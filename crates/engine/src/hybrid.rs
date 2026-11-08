@@ -1,4 +1,7 @@
-use std::{fs, io, path::Path};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
@@ -6,20 +9,32 @@ use chess_network::{BLOCKS, HEADS, INPUTS, Net, SQUARES, WIDTH, encode_position,
 use serde_json::{Value, json};
 
 use crate::{
-    chess::Color,
-    matches::{Candidate, Evaluation, Options, run_match},
-    mcts::Leaf,
+    chess::{Color, Game},
+    mcts::{Leaf, MoveVisits, Search},
 };
 
-struct Hybrid {
+pub(crate) struct Evaluation {
+    pub value: f32,
+    pub priors: Vec<f32>,
+}
+
+pub struct Hybrid {
     policy: Net,
     value: [[f32; 10]; 3],
     bias: [f32; 3],
     device: Device,
+    pub(crate) model_dir: PathBuf,
+    pub(crate) value_path: PathBuf,
 }
 
 impl Hybrid {
-    fn load(model_dir: &Path, value_path: &Path, device: Device) -> io::Result<Self> {
+    pub fn load(model_dir: &Path, value_path: &Path, device: &str) -> io::Result<Self> {
+        let device = match device {
+            "cpu" => Device::Cpu,
+            "cuda" if cfg!(feature = "cuda") => Device::new_cuda(0).map_err(io::Error::other)?,
+            "cuda" => return Err(io::Error::other("build chess-engine with --features cuda")),
+            _ => return Err(io::Error::other("device must be cpu or cuda")),
+        };
         let model: Value = serde_json::from_slice(&fs::read(model_dir.join("model.json"))?)?;
         for (key, expected) in [
             ("architecture", json!("lc0_style_smolgen_v1")),
@@ -60,6 +75,8 @@ impl Hybrid {
             value,
             bias,
             device,
+            model_dir: model_dir.into(),
+            value_path: value_path.into(),
         })
     }
 
@@ -134,6 +151,19 @@ impl Hybrid {
         normalize(&mut logits);
         logits[2] - logits[0]
     }
+    pub fn search(&self, game: &Game, visits: std::num::NonZeroU32) -> io::Result<Vec<MoveVisits>> {
+        if game.outcome().is_some() {
+            return Ok(Vec::new());
+        }
+        let mut search = Search::new();
+        while let Some(leaf) = search.next_leaf(game, visits) {
+            let batch = [(0, leaf)];
+            let result = self.evaluate(&batch)?.pop().expect("one prediction");
+            let [(_, leaf)] = batch;
+            search.evaluate(leaf.moves, result.value, &result.priors);
+        }
+        Ok(search.visits().collect())
+    }
 }
 
 fn normalize(logits: &mut [f32]) {
@@ -147,8 +177,11 @@ fn normalize(logits: &mut [f32]) {
     }
 }
 
-impl Candidate for Hybrid {
-    fn evaluate(&self, batch: &[(usize, Leaf)]) -> io::Result<Vec<Evaluation>> {
+impl Hybrid {
+    pub(crate) fn evaluate(&self, batch: &[(usize, Leaf)]) -> io::Result<Vec<Evaluation>> {
+        if batch.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut values = Vec::with_capacity(batch.len());
         let logits = self.logits(batch, &mut values).map_err(io::Error::other)?;
         batch
@@ -161,27 +194,8 @@ impl Candidate for Hybrid {
                     return Err(io::Error::other("non-finite hybrid prediction"));
                 }
                 normalize(&mut priors);
-                Ok(Evaluation {
-                    value,
-                    priors: Some(priors),
-                })
+                Ok(Evaluation { value, priors })
             })
             .collect()
     }
-}
-
-pub fn run(options: Options, model: &Path, value: &Path, device: &str) -> io::Result<()> {
-    let backend = match device {
-        "cpu" => Device::Cpu,
-        "cuda" if cfg!(feature = "cuda") => Device::new_cuda(0).map_err(io::Error::other)?,
-        "cuda" => return Err(io::Error::other("build chess-engine with --features cuda")),
-        _ => return Err(io::Error::other("device must be cpu or cuda")),
-    };
-    let hybrid = Hybrid::load(model, value, backend)?;
-    println!(
-        "policy={} value={} device={device}",
-        model.display(),
-        value.display()
-    );
-    run_match(options, Some(&hybrid))
 }

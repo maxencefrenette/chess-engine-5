@@ -33,12 +33,12 @@ struct Tree {
 }
 
 impl Tree {
-    fn expand(&mut self, index: usize, moves: Vec<Move>, priors: Option<&[f32]>) {
+    fn expand(&mut self, index: usize, moves: Vec<Move>, priors: &[f32]) {
         let start = self.nodes.len();
         self.nodes.resize_with(start + moves.len(), Node::default);
-        let uniform = 1. / moves.len() as f32;
-        for (i, child) in self.nodes[start..].iter_mut().enumerate() {
-            child.prior = priors.map_or(uniform, |priors| priors[i]);
+        assert_eq!(moves.len(), priors.len());
+        for (child, &prior) in self.nodes[start..].iter_mut().zip(priors) {
+            child.prior = prior;
         }
         self.moves.extend(moves);
         let children = start..self.nodes.len();
@@ -75,13 +75,7 @@ pub(crate) struct Search {
 }
 
 impl Search {
-    pub fn new(moves: Vec<Move>) -> Self {
-        let mut search = Self::with_policy();
-        search.tree.expand(0, moves, None);
-        search
-    }
-
-    pub fn with_policy() -> Self {
+    pub fn new() -> Self {
         Self {
             tree: Tree {
                 nodes: vec![Node::default()],
@@ -128,7 +122,7 @@ impl Search {
         None
     }
 
-    pub fn evaluate(&mut self, moves: Vec<Move>, value: f32, priors: Option<&[f32]>) {
+    pub fn evaluate(&mut self, moves: Vec<Move>, value: f32, priors: &[f32]) {
         let index = *self.path.last().expect("a leaf is pending");
         self.tree.expand(index, moves, priors);
         if index != 0 {
@@ -155,33 +149,6 @@ impl Search {
     }
 }
 
-/// Run uniform-prior PUCT and return the root visit counts in legal move order.
-/// The leaf evaluator returns a value in [-1, 1] for the side to move.
-/// A finished game returns no moves.
-pub fn search(
-    game: &Game,
-    simulations: NonZeroU32,
-    evaluate: impl Fn(&Game) -> f32,
-) -> Vec<MoveVisits> {
-    let moves = game.legal_moves();
-    if game.outcome_with_moves(&moves).is_some() {
-        return Vec::new();
-    }
-
-    let mut search = Search::new(moves);
-    while let Some(leaf) = search.next_leaf(game, simulations) {
-        search.evaluate(leaf.moves, evaluate(&leaf.game), None);
-    }
-    search.visits().collect()
-}
-
-/// Material-only leaf evaluation from the side to move.
-pub fn material_value(game: &Game) -> f32 {
-    let material = game.material_balance() as f32;
-    // Keep heuristic evaluations strictly inside the range of game results.
-    material / (material.abs() + 8.0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,14 +157,15 @@ mod tests {
     fn a_root_prior_guides_the_first_visit_without_using_the_budget() {
         let game = Game::default();
         let budget = NonZeroU32::new(1).unwrap();
-        let mut search = Search::with_policy();
+        let mut search = Search::new();
         let root = search.next_leaf(&game, budget).unwrap();
         let mut priors = vec![0.; root.moves.len()];
         *priors.last_mut().unwrap() = 1.;
         let expected = *root.moves.last().unwrap();
-        search.evaluate(root.moves, 0., Some(&priors));
+        search.evaluate(root.moves, 0., &priors);
         let child = search.next_leaf(&game, budget).unwrap();
-        search.evaluate(child.moves, 0., None);
+        let priors = vec![1. / child.moves.len() as f32; child.moves.len()];
+        search.evaluate(child.moves, 0., &priors);
         assert!(search.next_leaf(&game, budget).is_none());
         let visited: Vec<_> = search.visits().filter(|entry| entry.visits != 0).collect();
         assert_eq!(visited.len(), 1);
@@ -218,7 +186,12 @@ mod tests {
         }
 
         let budget = NonZeroU32::new(128).unwrap();
-        let visits = search(&game, budget, |_| 0.0);
+        let mut search = Search::new();
+        while let Some(leaf) = search.next_leaf(&game, budget) {
+            let priors = vec![1. / leaf.moves.len() as f32; leaf.moves.len()];
+            search.evaluate(leaf.moves, 0., &priors);
+        }
+        let visits: Vec<_> = search.visits().collect();
         assert_eq!(
             visits.iter().map(|entry| entry.visits).sum::<u32>(),
             budget.get()

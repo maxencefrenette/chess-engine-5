@@ -248,25 +248,6 @@ impl Game {
         }
         self.position = next;
     }
-
-    /// Material balance in pawn units, from the side to move.
-    pub fn material_balance(&self) -> i32 {
-        self.position
-            .board
-            .iter()
-            .flatten()
-            .map(|&(color, piece)| {
-                let value = match piece {
-                    Pawn => 1,
-                    Knight | Bishop => 3,
-                    Rook => 5,
-                    Queen => 9,
-                    King => 0,
-                };
-                if color == self.turn() { value } else { -value }
-            })
-            .sum()
-    }
 }
 
 impl Position {

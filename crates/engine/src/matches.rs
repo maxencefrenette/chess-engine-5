@@ -5,7 +5,8 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::{
     chess::{Color, Game, Outcome},
-    mcts::{Leaf, Search, material_value},
+    hybrid::Hybrid,
+    mcts::{Leaf, Search},
     sprt,
 };
 
@@ -18,22 +19,16 @@ struct ActiveGame {
 }
 
 impl ActiveGame {
-    fn new(id: u64, seed: u64, hybrid: bool) -> Self {
+    fn new(id: u64, seed: u64) -> Self {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         rng.set_stream(id / 2);
-        let game = Game::default();
-        let search = Search::new(game.legal_moves());
-        let mut active = Self {
+        Self {
             id,
-            game,
-            search,
+            game: Game::default(),
+            search: Search::new(),
             rng,
             ply: 0,
-        };
-        if hybrid && active.player() == 1 {
-            active.search = Search::with_policy();
         }
-        active
     }
 
     fn candidate_color(&self) -> Color {
@@ -48,7 +43,7 @@ impl ActiveGame {
         usize::from(self.game.turn() == self.candidate_color())
     }
 
-    fn play(&mut self, visits: NonZeroU32, hybrid: bool) -> Option<Outcome> {
+    fn play(&mut self, visits: NonZeroU32) -> Option<Outcome> {
         let choice = if self.ply < 4 {
             let ticket = self.rng.random_range(0..visits.get());
             let mut cumulative = 0;
@@ -71,16 +66,8 @@ impl ActiveGame {
         self.game
             .play_legal(choice.expect("completed search has a move").mv);
         self.ply += 1;
-        let moves = self.game.legal_moves();
-        let outcome = self.game.outcome_with_moves(&moves);
-        if outcome.is_none() {
-            self.search = if hybrid && self.player() == 1 {
-                Search::with_policy()
-            } else {
-                Search::new(moves)
-            };
-        }
-        outcome
+        self.search = Search::new();
+        self.game.outcome()
     }
 }
 
@@ -91,21 +78,7 @@ pub struct Options {
     pub seed: u64,
 }
 
-pub fn run(options: Options) -> io::Result<()> {
-    run_match(options, None)
-}
-
-pub(crate) struct Evaluation {
-    pub value: f32,
-    pub priors: Option<Vec<f32>>,
-}
-
-pub(crate) trait Candidate {
-    fn evaluate(&self, batch: &[(usize, Leaf)]) -> io::Result<Vec<Evaluation>>;
-}
-
-pub(crate) fn run_match(options: Options, candidate: Option<&dyn Candidate>) -> io::Result<()> {
-    let hybrid = candidate.is_some();
+pub fn run(options: Options, players: [&Hybrid; 2]) -> io::Result<()> {
     if options.batch == 0 || options.max_pairs == 0 || options.max_pairs > u64::MAX / 2 {
         return Err(io::Error::other(
             "batch must be positive and max pairs must be positive and fit twice in u64",
@@ -114,7 +87,7 @@ pub(crate) fn run_match(options: Options, candidate: Option<&dyn Candidate>) -> 
     let limit = 2 * options.max_pairs;
     let mut next_id = u64::from(options.batch).min(limit);
     let mut active: Vec<_> = (0..next_id)
-        .map(|id| ActiveGame::new(id, options.seed, hybrid))
+        .map(|id| ActiveGame::new(id, options.seed))
         .collect();
     let mut results = BTreeMap::new();
     let mut next_pair = 0;
@@ -123,8 +96,7 @@ pub(crate) fn run_match(options: Options, candidate: Option<&dyn Candidate>) -> 
     let mut llr = 0.0;
     let mut max_batches = [0; 2];
     println!(
-        "{} vs. uniform-prior material; SPRT [{}, {}] logistic Elo, alpha=beta=0.05; batch={} visits={} max_pairs={} seed={}",
-        if hybrid { "hybrid" } else { "material" },
+        "checkpoint match; SPRT [{}, {}] logistic Elo, alpha=beta=0.05; batch={} visits={} max_pairs={} seed={}",
         sprt::LOWER_ELO,
         sprt::UPPER_ELO,
         options.batch,
@@ -139,7 +111,7 @@ pub(crate) fn run_match(options: Options, candidate: Option<&dyn Candidate>) -> 
         for (i, slot) in active.iter_mut().enumerate() {
             if let Some(leaf) = slot.search.next_leaf(&slot.game, options.visits) {
                 pending[slot.player()].push((i, leaf));
-            } else if let Some(outcome) = slot.play(options.visits, hybrid) {
+            } else if let Some(outcome) = slot.play(options.visits) {
                 let points = match outcome {
                     Outcome::Win(color) if color == slot.candidate_color() => 2,
                     Outcome::Win(_) => 0,
@@ -181,28 +153,16 @@ pub(crate) fn run_match(options: Options, candidate: Option<&dyn Candidate>) -> 
 
         for (side, batch) in pending.into_iter().enumerate() {
             max_batches[side] = max_batches[side].max(batch.len());
-            if side == 1
-                && !batch.is_empty()
-                && let Some(candidate) = candidate
-            {
-                let evaluations = candidate.evaluate(&batch)?;
-                for ((slot, leaf), result) in batch.into_iter().zip(evaluations) {
-                    active[slot].search.evaluate(
-                        leaf.moves,
-                        result.value,
-                        result.priors.as_deref(),
-                    );
-                }
-            } else {
-                for (slot, leaf) in batch {
-                    let value = material_value(&leaf.game);
-                    active[slot].search.evaluate(leaf.moves, value, None);
-                }
+            let evaluations = players[side].evaluate(&batch)?;
+            for ((slot, leaf), result) in batch.into_iter().zip(evaluations) {
+                active[slot]
+                    .search
+                    .evaluate(leaf.moves, result.value, &result.priors);
             }
         }
         for i in finished.into_iter().rev() {
             if next_id < limit {
-                active[i] = ActiveGame::new(next_id, options.seed, hybrid);
+                active[i] = ActiveGame::new(next_id, options.seed);
                 next_id += 1;
             } else {
                 active.swap_remove(i);

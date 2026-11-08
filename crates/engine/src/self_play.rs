@@ -16,12 +16,12 @@ use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use parquet::{arrow::ArrowWriter, basic::Compression, file::properties::WriterProperties};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use rayon::prelude::*;
 use serde_json::json;
 
 use crate::{
-    chess::{Game, Outcome, Snapshot},
-    mcts::{MoveVisits, material_value, search},
+    chess::{Color, Game, Outcome, Snapshot},
+    hybrid::Hybrid,
+    mcts::{MoveVisits, Search},
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -29,7 +29,6 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 const VISITS: NonZeroU32 = NonZeroU32::new(800).unwrap();
 const ROW_GROUP_ROWS: usize = 65_536;
 const SHARD_ROWS: usize = 4 * ROW_GROUP_ROWS;
-const GAME_BATCH: usize = 16;
 
 struct PositionRow {
     snapshot: Snapshot,
@@ -42,47 +41,93 @@ struct PlayedGame {
     white_value: i8,
 }
 
-fn play_game(seed: u64, game_id: u64) -> PlayedGame {
-    let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    rng.set_stream(game_id);
-    let mut game = Game::default();
-    let mut positions = Vec::new();
-    loop {
-        let policy = search(&game, VISITS, material_value);
-        if policy.is_empty() {
-            let white_value = match game.outcome().expect("empty search means game over") {
-                Outcome::Win(crate::chess::Color::White) => 1,
-                Outcome::Win(_) => -1,
-                Outcome::Draw => 0,
-            };
-            return PlayedGame {
-                positions,
-                white_value,
-            };
-        }
+struct ActiveGame {
+    id: usize,
+    game: Game,
+    search: Search,
+    rng: ChaCha8Rng,
+    positions: Vec<PositionRow>,
+}
 
+impl ActiveGame {
+    fn new(seed: u64, id: usize) -> Self {
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        rng.set_stream(id as u64);
+        Self {
+            id,
+            game: Game::default(),
+            search: Search::new(),
+            rng,
+            positions: Vec::new(),
+        }
+    }
+
+    fn play(&mut self) -> Option<Outcome> {
+        let policy: Vec<_> = self.search.visits().collect();
         // Temperature 1 samples each move in direct proportion to its visits.
-        let mut ticket = rng.random_range(0..VISITS.get());
+        let ticket = self.rng.random_range(0..VISITS.get());
+        let mut cumulative = 0;
         let played = policy
             .iter()
             .find(|entry| {
-                if ticket < entry.visits {
-                    true
-                } else {
-                    ticket -= entry.visits;
-                    false
-                }
+                cumulative += entry.visits;
+                cumulative > ticket
             })
             .expect("root visits sum to the search budget")
             .mv;
         let legal_moves: Vec<_> = policy.iter().map(|entry| entry.mv).collect();
-        positions.push(PositionRow {
-            snapshot: game.snapshot(&legal_moves),
+        self.positions.push(PositionRow {
+            snapshot: self.game.snapshot(&legal_moves),
             policy,
             played_move: played.packed(),
         });
-        game.play_legal(played);
+        self.game.play_legal(played);
+        self.search = Search::new();
+        self.game.outcome()
     }
+}
+
+fn play_batch(
+    model: &Hybrid,
+    seed: u64,
+    ids: std::ops::Range<usize>,
+) -> Result<Vec<(usize, PlayedGame)>> {
+    let mut active: Vec<_> = ids.map(|id| ActiveGame::new(seed, id)).collect();
+    let mut completed = Vec::with_capacity(active.len());
+    while !active.is_empty() {
+        let mut pending = Vec::new();
+        let mut finished = Vec::new();
+        for (i, slot) in active.iter_mut().enumerate() {
+            if let Some(leaf) = slot.search.next_leaf(&slot.game, VISITS) {
+                pending.push((i, leaf));
+            } else if let Some(outcome) = slot.play() {
+                let white_value = match outcome {
+                    Outcome::Win(Color::White) => 1,
+                    Outcome::Win(Color::Black) => -1,
+                    Outcome::Draw => 0,
+                };
+                finished.push((i, white_value));
+            }
+        }
+        let evaluations = model.evaluate(&pending)?;
+        for ((i, leaf), result) in pending.into_iter().zip(evaluations) {
+            active[i]
+                .search
+                .evaluate(leaf.moves, result.value, &result.priors);
+        }
+        for (i, white_value) in finished.into_iter().rev() {
+            let slot = active.swap_remove(i);
+            completed.push((
+                slot.id,
+                PlayedGame {
+                    positions: slot.positions,
+                    white_value,
+                },
+            ));
+        }
+    }
+    completed.sort_unstable_by_key(|(id, _)| *id);
+    Ok(completed)
 }
 
 fn schema() -> SchemaRef {
@@ -186,7 +231,13 @@ impl Shard {
     }
 }
 
-pub fn generate(root: &Path, games: NonZeroUsize, seed: u64) -> Result<PathBuf> {
+pub fn generate(
+    root: &Path,
+    games: NonZeroUsize,
+    seed: u64,
+    batch: NonZeroUsize,
+    model: &Hybrid,
+) -> Result<PathBuf> {
     let version = root.join("v1");
     fs::create_dir_all(&version)?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
@@ -201,14 +252,9 @@ pub fn generate(root: &Path, games: NonZeroUsize, seed: u64) -> Result<PathBuf> 
     let mut white_wins = 0;
     let mut black_wins = 0;
     let mut draws = 0;
-    for start in (0..games.get()).step_by(GAME_BATCH) {
-        let end = start.saturating_add(GAME_BATCH).min(games.get());
-        let batch: Vec<_> = (start..end)
-            .into_par_iter()
-            .map(|id| play_game(seed, id as u64))
-            .collect();
-
-        for (id, game) in (start..end).zip(batch) {
+    for start in (0..games.get()).step_by(batch.get()) {
+        let end = start.saturating_add(batch.get()).min(games.get());
+        for (id, game) in play_batch(model, seed, start..end)? {
             let batch = encode_game(schema.clone(), id as u64, &game)?;
             if shard.rows > 0 && shard.rows + batch.num_rows() > SHARD_ROWS {
                 shard.finish()?;
@@ -241,8 +287,11 @@ pub fn generate(root: &Path, games: NonZeroUsize, seed: u64) -> Result<PathBuf> 
         "draws": draws,
         "start_position": "standard",
         "visits_per_move": VISITS.get(),
-        "evaluator": "material-v1",
-        "priors": "uniform",
+        "evaluator": "piece-count-wdl-v1",
+        "priors": "smolgen-policy-v1",
+        "policy_checkpoint": model.model_dir,
+        "value_checkpoint": model.value_path,
+        "game_batch": batch.get(),
         "sampling": "chacha8-stream-per-game; probability proportional to root visits",
         "temperature": 1,
     });

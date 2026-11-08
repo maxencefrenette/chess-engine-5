@@ -309,7 +309,6 @@ dependencies = [
  "parquet",
  "rand",
  "rand_chacha",
- "rayon",
  "serde_json",
 ]
 
