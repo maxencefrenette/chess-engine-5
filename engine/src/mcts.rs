@@ -125,6 +125,13 @@ pub fn search(
         .collect()
 }
 
+/// Material-only leaf evaluation from the side to move.
+pub fn material_value(game: &Game) -> f32 {
+    let material = game.material_balance() as f32;
+    // Keep heuristic evaluations strictly inside the range of game results.
+    material / (material.abs() + 8.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

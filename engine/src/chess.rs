@@ -42,6 +42,20 @@ pub struct Move {
     promotion: Option<Piece>,
 }
 
+impl Move {
+    pub(crate) fn packed(self) -> u16 {
+        let promotion = match self.promotion {
+            None => 0,
+            Some(Knight) => 1,
+            Some(Bishop) => 2,
+            Some(Rook) => 3,
+            Some(Queen) => 4,
+            _ => unreachable!("invalid promotion"),
+        };
+        u16::from(self.from) | (u16::from(self.to) << 6) | (promotion << 12)
+    }
+}
+
 impl fmt::Display for Move {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for square in [self.from, self.to] {
@@ -100,6 +114,14 @@ pub struct Game {
     halfmoves: u16,
 }
 
+pub(crate) struct Snapshot {
+    pub board: [u8; 32],
+    pub castling: u8,
+    pub ep_square: u8,
+    pub halfmove_clock: u8,
+    pub repetitions: u8,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Win(Color),
@@ -151,6 +173,42 @@ impl Game {
         self.outcome_with_moves(&self.legal_moves())
     }
 
+    pub(crate) fn snapshot(&self, moves: &[Move]) -> Snapshot {
+        let mut board = [0; 32];
+        for (square, piece) in self.position.board.iter().enumerate() {
+            if let Some((color, piece)) = piece {
+                let kind = match piece {
+                    Pawn => 1,
+                    Knight => 2,
+                    Bishop => 3,
+                    Rook => 4,
+                    Queen => 5,
+                    King => 6,
+                };
+                let code = kind + if *color == Color::Black { 6 } else { 0 };
+                board[square / 2] |= code << (4 * (square % 2));
+            }
+        }
+        let mut castling = 0;
+        for (bit, square) in [7, 0, 63, 56].into_iter().enumerate() {
+            if self.position.castling & (1 << square) != 0 {
+                castling |= 1 << bit;
+            }
+        }
+        Snapshot {
+            board,
+            castling,
+            ep_square: self.position.en_passant.unwrap_or(64),
+            halfmove_clock: self.halfmoves as u8,
+            repetitions: (1 + self.prior_occurrences(moves)) as u8,
+        }
+    }
+
+    fn prior_occurrences(&self, moves: &[Move]) -> usize {
+        let key = self.position.repetition_key(moves);
+        self.history.iter().filter(|prior| **prior == key).count()
+    }
+
     pub(crate) fn outcome_with_moves(&self, moves: &[Move]) -> Option<Outcome> {
         if moves.is_empty() {
             return Some(if self.position.in_check(self.turn()) {
@@ -163,18 +221,8 @@ impl Game {
         if self.halfmoves >= 100 || self.position.insufficient_material() {
             return Some(Outcome::Draw);
         }
-        if self.history.len() >= 8 {
-            let key = self.position.repetition_key(moves);
-            if self
-                .history
-                .iter()
-                .rev()
-                .filter(|prior| **prior == key)
-                .nth(1)
-                .is_some()
-            {
-                return Some(Outcome::Draw);
-            }
+        if self.history.len() >= 8 && self.prior_occurrences(moves) >= 2 {
+            return Some(Outcome::Draw);
         }
         None
     }
