@@ -1,0 +1,11 @@
+[tools]
+rust = "1.95.0"
+python = "3.13.16"
+uv = "0.13.0"
+
+[env]
+UV_PYTHON = { value = "{{ tools.python.path }}", tools = true }
+
+[tasks.test]
+description = "Run the engine tests"
+run = "cargo test --workspace"
