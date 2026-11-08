@@ -13,6 +13,7 @@ pub struct MoveVisits {
 #[derive(Default)]
 struct Node {
     visits: u32,
+    prior: f32,
     value_sum: f32,
     state: NodeState,
 }
@@ -32,17 +33,20 @@ struct Tree {
 }
 
 impl Tree {
-    fn expand(&mut self, index: usize, moves: Vec<Move>) {
+    fn expand(&mut self, index: usize, moves: Vec<Move>, priors: Option<&[f32]>) {
         let start = self.nodes.len();
         self.nodes.resize_with(start + moves.len(), Node::default);
+        let uniform = 1. / moves.len() as f32;
+        for (i, child) in self.nodes[start..].iter_mut().enumerate() {
+            child.prior = priors.map_or(uniform, |priors| priors[i]);
+        }
         self.moves.extend(moves);
         let children = start..self.nodes.len();
         self.nodes[index].state = NodeState::Branch(children);
     }
 
     fn select(&self, parent: usize, children: Range<usize>) -> usize {
-        let prior = 1.0 / children.len() as f32;
-        let exploration = EXPLORATION * prior * (self.nodes[parent].visits.max(1) as f32).sqrt();
+        let exploration = (self.nodes[parent].visits.max(1) as f32).sqrt();
         children
             .max_by(|&left, &right| {
                 self.score(left, exploration)
@@ -56,7 +60,7 @@ impl Tree {
         let node = &self.nodes[child];
         // Child values are from the opponent's perspective.
         let value = -node.value_sum / node.visits.max(1) as f32;
-        value + exploration / (1.0 + node.visits as f32)
+        value + EXPLORATION * node.prior * exploration / (1.0 + node.visits as f32)
     }
 }
 
@@ -72,13 +76,17 @@ pub(crate) struct Search {
 
 impl Search {
     pub fn new(moves: Vec<Move>) -> Self {
-        let mut tree = Tree {
-            nodes: vec![Node::default()],
-            moves: Vec::new(),
-        };
-        tree.expand(0, moves);
+        let mut search = Self::with_policy();
+        search.tree.expand(0, moves, None);
+        search
+    }
+
+    pub fn with_policy() -> Self {
         Self {
-            tree,
+            tree: Tree {
+                nodes: vec![Node::default()],
+                moves: Vec::new(),
+            },
             path: Vec::new(),
         }
     }
@@ -120,10 +128,12 @@ impl Search {
         None
     }
 
-    pub fn evaluate(&mut self, moves: Vec<Move>, value: f32) {
+    pub fn evaluate(&mut self, moves: Vec<Move>, value: f32, priors: Option<&[f32]>) {
         let index = *self.path.last().expect("a leaf is pending");
-        self.tree.expand(index, moves);
-        self.backup(value);
+        self.tree.expand(index, moves, priors);
+        if index != 0 {
+            self.backup(value);
+        }
     }
 
     fn backup(&mut self, mut value: f32) {
@@ -160,7 +170,7 @@ pub fn search(
 
     let mut search = Search::new(moves);
     while let Some(leaf) = search.next_leaf(game, simulations) {
-        search.evaluate(leaf.moves, evaluate(&leaf.game));
+        search.evaluate(leaf.moves, evaluate(&leaf.game), None);
     }
     search.visits().collect()
 }
@@ -175,6 +185,25 @@ pub fn material_value(game: &Game) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_root_prior_guides_the_first_visit_without_using_the_budget() {
+        let game = Game::default();
+        let budget = NonZeroU32::new(1).unwrap();
+        let mut search = Search::with_policy();
+        let root = search.next_leaf(&game, budget).unwrap();
+        let mut priors = vec![0.; root.moves.len()];
+        *priors.last_mut().unwrap() = 1.;
+        let expected = *root.moves.last().unwrap();
+        search.evaluate(root.moves, 0., Some(&priors));
+        let child = search.next_leaf(&game, budget).unwrap();
+        search.evaluate(child.moves, 0., None);
+        assert!(search.next_leaf(&game, budget).is_none());
+        let visited: Vec<_> = search.visits().filter(|entry| entry.visits != 0).collect();
+        assert_eq!(visited.len(), 1);
+        assert_eq!(visited[0].mv, expected);
+        assert_eq!(visited[0].visits, 1);
+    }
 
     #[test]
     fn search_prefers_mate_with_a_neutral_evaluator() {

@@ -303,6 +303,9 @@ version = "0.1.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
+ "candle-core",
+ "candle-nn",
+ "chess-network",
  "parquet",
  "rand",
  "rand_chacha",
@@ -311,11 +314,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "chess-trainer"
+name = "chess-network"
 version = "0.1.0"
 dependencies = [
  "candle-core",
  "candle-nn",
+]
+
+[[package]]
+name = "chess-trainer"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "candle-core",
+ "candle-nn",
+ "chess-network",
+ "parquet",
+ "rand",
+ "rand_chacha",
+ "serde_json",
 ]
 
 [[package]]

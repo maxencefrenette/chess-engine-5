@@ -1,4 +1,6 @@
 // Scores are the candidate's total points per color-swapped pair, in half-points.
+pub(crate) const LOWER_ELO: f64 = 0.0;
+pub(crate) const UPPER_ELO: f64 = 20.0;
 pub(crate) const BOUNDARY: f64 = 2.944_438_979_166_440_3;
 
 fn log_likelihood(counts: [u64; 5], elo: f64) -> f64 {
@@ -33,7 +35,7 @@ fn log_likelihood(counts: [u64; 5], elo: f64) -> f64 {
 }
 
 pub(crate) fn llr(counts: [u64; 5]) -> f64 {
-    log_likelihood(counts, 10.0) - log_likelihood(counts, 0.0)
+    log_likelihood(counts, UPPER_ELO) - log_likelihood(counts, LOWER_ELO)
 }
 
 #[cfg(test)]
@@ -44,7 +46,7 @@ mod tests {
     fn logistic_pair_likelihood_matches_closed_form_for_balanced_decisive_pairs() {
         // With only the two extreme bins occupied, the fitted probabilities
         // approach those of a Bernoulli trial. Regularization is negligible here.
-        let score = 1.0 / (1.0 + 10_f64.powf(-10.0 / 400.0));
+        let score = 1.0 / (1.0 + 10_f64.powf(-UPPER_ELO / 400.0));
         let expected = 1000.0 * (4.0 * score * (1.0 - score)).ln();
         assert!((llr([1000, 0, 0, 0, 1000]) - expected).abs() < 0.001);
         assert!(llr([0, 0, 0, 0, 200]) > BOUNDARY);

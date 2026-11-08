@@ -18,18 +18,22 @@ struct ActiveGame {
 }
 
 impl ActiveGame {
-    fn new(id: u64, seed: u64) -> Self {
+    fn new(id: u64, seed: u64, hybrid: bool) -> Self {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         rng.set_stream(id / 2);
         let game = Game::default();
         let search = Search::new(game.legal_moves());
-        Self {
+        let mut active = Self {
             id,
             game,
             search,
             rng,
             ply: 0,
+        };
+        if hybrid && active.player() == 1 {
+            active.search = Search::with_policy();
         }
+        active
     }
 
     fn candidate_color(&self) -> Color {
@@ -44,7 +48,7 @@ impl ActiveGame {
         usize::from(self.game.turn() == self.candidate_color())
     }
 
-    fn play(&mut self, visits: NonZeroU32) -> Option<Outcome> {
+    fn play(&mut self, visits: NonZeroU32, hybrid: bool) -> Option<Outcome> {
         let choice = if self.ply < 4 {
             let ticket = self.rng.random_range(0..visits.get());
             let mut cumulative = 0;
@@ -70,7 +74,11 @@ impl ActiveGame {
         let moves = self.game.legal_moves();
         let outcome = self.game.outcome_with_moves(&moves);
         if outcome.is_none() {
-            self.search = Search::new(moves);
+            self.search = if hybrid && self.player() == 1 {
+                Search::with_policy()
+            } else {
+                Search::new(moves)
+            };
         }
         outcome
     }
@@ -84,6 +92,20 @@ pub struct Options {
 }
 
 pub fn run(options: Options) -> io::Result<()> {
+    run_match(options, None)
+}
+
+pub(crate) struct Evaluation {
+    pub value: f32,
+    pub priors: Option<Vec<f32>>,
+}
+
+pub(crate) trait Candidate {
+    fn evaluate(&self, batch: &[(usize, Leaf)]) -> io::Result<Vec<Evaluation>>;
+}
+
+pub(crate) fn run_match(options: Options, candidate: Option<&dyn Candidate>) -> io::Result<()> {
+    let hybrid = candidate.is_some();
     if options.batch == 0 || options.max_pairs == 0 || options.max_pairs > u64::MAX / 2 {
         return Err(io::Error::other(
             "batch must be positive and max pairs must be positive and fit twice in u64",
@@ -92,7 +114,7 @@ pub fn run(options: Options) -> io::Result<()> {
     let limit = 2 * options.max_pairs;
     let mut next_id = u64::from(options.batch).min(limit);
     let mut active: Vec<_> = (0..next_id)
-        .map(|id| ActiveGame::new(id, options.seed))
+        .map(|id| ActiveGame::new(id, options.seed, hybrid))
         .collect();
     let mut results = BTreeMap::new();
     let mut next_pair = 0;
@@ -101,8 +123,14 @@ pub fn run(options: Options) -> io::Result<()> {
     let mut llr = 0.0;
     let mut max_batches = [0; 2];
     println!(
-        "material vs. material on CPU; SPRT [0, 10] logistic Elo, alpha=beta=0.05; batch={} visits={} max_pairs={} seed={}",
-        options.batch, options.visits, options.max_pairs, options.seed
+        "{} vs. uniform-prior material; SPRT [{}, {}] logistic Elo, alpha=beta=0.05; batch={} visits={} max_pairs={} seed={}",
+        if hybrid { "hybrid" } else { "material" },
+        sprt::LOWER_ELO,
+        sprt::UPPER_ELO,
+        options.batch,
+        options.visits,
+        options.max_pairs,
+        options.seed
     );
 
     while !active.is_empty() {
@@ -111,7 +139,7 @@ pub fn run(options: Options) -> io::Result<()> {
         for (i, slot) in active.iter_mut().enumerate() {
             if let Some(leaf) = slot.search.next_leaf(&slot.game, options.visits) {
                 pending[slot.player()].push((i, leaf));
-            } else if let Some(outcome) = slot.play(options.visits) {
+            } else if let Some(outcome) = slot.play(options.visits, hybrid) {
                 let points = match outcome {
                     Outcome::Win(color) if color == slot.candidate_color() => 2,
                     Outcome::Win(_) => 0,
@@ -133,19 +161,19 @@ pub fn run(options: Options) -> io::Result<()> {
             wdl[2 - second] += 1;
             next_pair += 1;
             llr = sprt::llr(counts);
-            if next_pair.is_multiple_of(25) || llr.abs() >= sprt::BOUNDARY {
+            if next_pair.is_multiple_of(10) || llr.abs() >= sprt::BOUNDARY {
                 println!(
                     "pairs={next_pair} candidate W/D/L={wdl:?} pentanomial={counts:?} LLR={llr:.4}"
                 );
             }
             if llr.abs() >= sprt::BOUNDARY {
-                let decision = if llr > 0.0 {
-                    "accepted H1 (+10 Elo)"
+                let (hypothesis, elo) = if llr > 0.0 {
+                    ("H1", sprt::UPPER_ELO)
                 } else {
-                    "accepted H0 (0 Elo)"
+                    ("H0", sprt::LOWER_ELO)
                 };
                 println!(
-                    "{decision}; largest inference batches (baseline/candidate)={max_batches:?}"
+                    "accepted {hypothesis} ({elo:+} Elo); largest inference batches (baseline/candidate)={max_batches:?}"
                 );
                 return Ok(());
             }
@@ -153,14 +181,28 @@ pub fn run(options: Options) -> io::Result<()> {
 
         for (side, batch) in pending.into_iter().enumerate() {
             max_batches[side] = max_batches[side].max(batch.len());
-            let values = evaluate_batch(&batch);
-            for ((slot, leaf), value) in batch.into_iter().zip(values) {
-                active[slot].search.evaluate(leaf.moves, value);
+            if side == 1
+                && !batch.is_empty()
+                && let Some(candidate) = candidate
+            {
+                let evaluations = candidate.evaluate(&batch)?;
+                for ((slot, leaf), result) in batch.into_iter().zip(evaluations) {
+                    active[slot].search.evaluate(
+                        leaf.moves,
+                        result.value,
+                        result.priors.as_deref(),
+                    );
+                }
+            } else {
+                for (slot, leaf) in batch {
+                    let value = material_value(&leaf.game);
+                    active[slot].search.evaluate(leaf.moves, value, None);
+                }
             }
         }
         for i in finished.into_iter().rev() {
             if next_id < limit {
-                active[i] = ActiveGame::new(next_id, options.seed);
+                active[i] = ActiveGame::new(next_id, options.seed, hybrid);
                 next_id += 1;
             } else {
                 active.swap_remove(i);
@@ -171,11 +213,4 @@ pub fn run(options: Options) -> io::Result<()> {
         "inconclusive at cap: pairs={next_pair} candidate W/D/L={wdl:?} pentanomial={counts:?} LLR={llr:.4}; largest inference batches (baseline/candidate)={max_batches:?}"
     );
     Ok(())
-}
-
-fn evaluate_batch(batch: &[(usize, Leaf)]) -> Vec<f32> {
-    batch
-        .iter()
-        .map(|(_, leaf)| material_value(&leaf.game))
-        .collect()
 }

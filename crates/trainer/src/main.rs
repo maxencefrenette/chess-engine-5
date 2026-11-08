@@ -1,34 +1,68 @@
-use std::{env, error::Error, process::ExitCode};
+use std::{env, error::Error, num::NonZeroUsize, path::Path, process::ExitCode};
 
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{Optimizer, SGD, VarBuilder, VarMap};
 
-const USAGE: &str = "usage: chess-trainer check-device [cpu|cuda]";
+mod data;
+mod train;
+
+const USAGE: &str = "usage: chess-trainer check-device [cpu|cuda] | train SHARD OUTPUT_DIR [EPOCHS=5] [cuda|cpu] [--material-hint]";
 
 fn run() -> Result<(), Box<dyn Error>> {
     let mut args = env::args().skip(1);
     let command = args.next();
-    let backend = args.next();
-    if command.as_deref() != Some("check-device") || args.next().is_some() {
-        return Err(USAGE.into());
-    }
-    let backend = backend.as_deref().unwrap_or("cpu");
-    let device = match backend {
-        "cpu" => Device::Cpu,
-        "cuda" => {
-            if !cfg!(feature = "cuda") {
-                return Err("CUDA requires building chess-trainer with --features cuda".into());
+    match command.as_deref() {
+        Some("check-device") => {
+            let backend = args.next().unwrap_or_else(|| "cpu".into());
+            if args.next().is_some() {
+                return Err(USAGE.into());
             }
-            Device::new_cuda(0)?
+            check_device(&backend, &device(&backend)?)
         }
-        _ => return Err(USAGE.into()),
-    };
+        Some("train") => {
+            let shard = args.next().ok_or(USAGE)?;
+            let output = args.next().ok_or(USAGE)?;
+            let epochs = args
+                .next()
+                .as_deref()
+                .unwrap_or("5")
+                .parse::<NonZeroUsize>()?;
+            let backend = args.next().unwrap_or_else(|| "cuda".into());
+            let hint = args.next();
+            if hint
+                .as_deref()
+                .is_some_and(|flag| flag != "--material-hint")
+                || args.next().is_some()
+            {
+                return Err(USAGE.into());
+            }
+            train::run(
+                Path::new(&shard),
+                Path::new(&output),
+                epochs.get(),
+                &device(&backend)?,
+                hint.is_some(),
+            )
+        }
+        _ => Err(USAGE.into()),
+    }
+}
 
+fn device(backend: &str) -> Result<Device, Box<dyn Error>> {
+    match backend {
+        "cpu" => Ok(Device::Cpu),
+        "cuda" if cfg!(feature = "cuda") => Ok(Device::new_cuda(0)?),
+        "cuda" => Err("CUDA requires building chess-trainer with --features cuda".into()),
+        _ => Err(USAGE.into()),
+    }
+}
+
+fn check_device(backend: &str, device: &Device) -> Result<(), Box<dyn Error>> {
     // Verify a gradient and parameter update on the selected device.
     let parameters = VarMap::new();
-    let builder = VarBuilder::from_varmap(&parameters, DType::F32, &device);
+    let builder = VarBuilder::from_varmap(&parameters, DType::F32, device);
     let weight = builder.get_with_hints((), "weight", candle_nn::Init::Const(0.0))?;
-    let target = Tensor::new(1.0_f32, &device)?;
+    let target = Tensor::new(1.0_f32, device)?;
     let loss = || (&weight - &target)?.sqr();
     let before = loss()?.to_scalar::<f32>()?;
     let mut optimizer = SGD::new(parameters.all_vars(), 0.1)?;

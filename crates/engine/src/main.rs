@@ -16,9 +16,16 @@ fn run() -> Result<(), String> {
     let mut args = env::args().skip(1);
     let first = args
         .next()
-        .ok_or("usage: chess-engine SIMULATIONS [MOVE ...] | self-play OUTPUT_DIR GAMES SEED | match [BATCH] [VISITS] [MAX_PAIRS] [SEED]")?;
-    if first == "match" {
-        let usage = "usage: chess-engine match [BATCH=8] [VISITS=800] [MAX_PAIRS=10000] [SEED=42]";
+        .ok_or("usage: chess-engine SIMULATIONS [MOVE ...] | self-play OUTPUT_DIR GAMES SEED | match [BATCH] [VISITS] [MAX_PAIRS] [SEED] | match-hybrid MODEL_DIR VALUE_JSON [BATCH] [VISITS] [MAX_PAIRS] [SEED] [DEVICE]")?;
+    if first == "match" || first == "match-hybrid" {
+        let hybrid = if first == "match-hybrid" {
+            Some((
+                args.next().ok_or("missing policy model directory")?,
+                args.next().ok_or("missing value JSON")?,
+            ))
+        } else {
+            None
+        };
         let batch = args
             .next()
             .as_deref()
@@ -43,16 +50,35 @@ fn run() -> Result<(), String> {
             .unwrap_or("42")
             .parse()
             .map_err(|_| "invalid seed")?;
-        if args.next().is_some() {
-            return Err(usage.into());
-        }
-        return matches::run(Options {
+        let options = Options {
             batch,
             visits,
             max_pairs,
             seed,
-        })
-        .map_err(|error| error.to_string());
+        };
+        if let Some((model, value)) = hybrid {
+            let device = args.next().unwrap_or_else(|| "cpu".into());
+            if args.next().is_some() {
+                return Err("too many match-hybrid arguments".into());
+            }
+            #[cfg(feature = "neural")]
+            return chess_engine::hybrid::run(
+                options,
+                Path::new(&model),
+                Path::new(&value),
+                &device,
+            )
+            .map_err(|error| error.to_string());
+            #[cfg(not(feature = "neural"))]
+            {
+                let _ = (options, model, value, device);
+                return Err("build chess-engine with --features neural or cuda".into());
+            }
+        }
+        if args.next().is_some() {
+            return Err("too many match arguments".into());
+        }
+        return matches::run(options).map_err(|error| error.to_string());
     }
     if first == "self-play" {
         let (Some(output), Some(games), Some(seed), None) =
