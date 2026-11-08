@@ -32,13 +32,12 @@ struct Tree {
 }
 
 impl Tree {
-    fn expand(&mut self, index: usize, moves: Vec<Move>) -> Range<usize> {
+    fn expand(&mut self, index: usize, moves: Vec<Move>) {
         let start = self.nodes.len();
         self.nodes.resize_with(start + moves.len(), Node::default);
         self.moves.extend(moves);
         let children = start..self.nodes.len();
-        self.nodes[index].state = NodeState::Branch(children.clone());
-        children
+        self.nodes[index].state = NodeState::Branch(children);
     }
 
     fn select(&self, parent: usize, children: Range<usize>) -> usize {
@@ -61,6 +60,91 @@ impl Tree {
     }
 }
 
+pub(crate) struct Leaf {
+    pub game: Game,
+    pub moves: Vec<Move>,
+}
+
+pub(crate) struct Search {
+    tree: Tree,
+    path: Vec<usize>,
+}
+
+impl Search {
+    pub fn new(moves: Vec<Move>) -> Self {
+        let mut tree = Tree {
+            nodes: vec![Node::default()],
+            moves: Vec::new(),
+        };
+        tree.expand(0, moves);
+        Self {
+            tree,
+            path: Vec::new(),
+        }
+    }
+
+    /// Advance through terminal simulations until there is an evaluation to do.
+    pub fn next_leaf(&mut self, game: &Game, budget: NonZeroU32) -> Option<Leaf> {
+        while self.tree.nodes[0].visits < budget.get() {
+            self.path.clear();
+            let mut position = game.clone();
+            let mut index = 0;
+            let value = loop {
+                self.path.push(index);
+                match &self.tree.nodes[index].state {
+                    NodeState::Branch(children) => {
+                        index = self.tree.select(index, children.clone());
+                        position.play_legal(self.tree.moves[index - 1]);
+                    }
+                    NodeState::Terminal(value) => break *value,
+                    NodeState::Unexpanded => {
+                        let moves = position.legal_moves();
+                        if let Some(outcome) = position.outcome_with_moves(&moves) {
+                            let value = match outcome {
+                                Outcome::Draw => 0.0,
+                                Outcome::Win(color) if color == position.turn() => 1.0,
+                                Outcome::Win(_) => -1.0,
+                            };
+                            self.tree.nodes[index].state = NodeState::Terminal(value);
+                            break value;
+                        }
+                        return Some(Leaf {
+                            game: position,
+                            moves,
+                        });
+                    }
+                }
+            };
+            self.backup(value);
+        }
+        None
+    }
+
+    pub fn evaluate(&mut self, moves: Vec<Move>, value: f32) {
+        let index = *self.path.last().expect("a leaf is pending");
+        self.tree.expand(index, moves);
+        self.backup(value);
+    }
+
+    fn backup(&mut self, mut value: f32) {
+        for &index in self.path.iter().rev() {
+            self.tree.nodes[index].visits += 1;
+            self.tree.nodes[index].value_sum += value;
+            value = -value;
+        }
+    }
+
+    pub fn visits(&self) -> impl Iterator<Item = MoveVisits> + '_ {
+        let NodeState::Branch(children) = &self.tree.nodes[0].state else {
+            unreachable!("root must be expanded");
+        };
+        children.clone().map(|index| MoveVisits {
+            mv: self.tree.moves[index - 1],
+            visits: self.tree.nodes[index].visits,
+        })
+    }
+}
+
 /// Run uniform-prior PUCT and return the root visit counts in legal move order.
 /// The leaf evaluator returns a value in [-1, 1] for the side to move.
 /// A finished game returns no moves.
@@ -74,55 +158,11 @@ pub fn search(
         return Vec::new();
     }
 
-    let mut tree = Tree {
-        nodes: vec![Node::default()],
-        moves: Vec::new(),
-    };
-    let root_children = tree.expand(0, moves);
-    let mut path = Vec::new();
-
-    for _ in 0..simulations.get() {
-        let mut position = game.clone();
-        let mut index = 0;
-        path.clear();
-        let mut value = loop {
-            path.push(index);
-            match &tree.nodes[index].state {
-                NodeState::Branch(children) => {
-                    index = tree.select(index, children.clone());
-                    position.play_legal(tree.moves[index - 1]);
-                }
-                NodeState::Terminal(value) => break *value,
-                NodeState::Unexpanded => {
-                    let moves = position.legal_moves();
-                    if let Some(outcome) = position.outcome_with_moves(&moves) {
-                        let value = match outcome {
-                            Outcome::Draw => 0.0,
-                            Outcome::Win(color) if color == position.turn() => 1.0,
-                            Outcome::Win(_) => -1.0,
-                        };
-                        tree.nodes[index].state = NodeState::Terminal(value);
-                        break value;
-                    }
-                    tree.expand(index, moves);
-                    break evaluate(&position);
-                }
-            }
-        };
-
-        for &index in path.iter().rev() {
-            tree.nodes[index].visits += 1;
-            tree.nodes[index].value_sum += value;
-            value = -value;
-        }
+    let mut search = Search::new(moves);
+    while let Some(leaf) = search.next_leaf(game, simulations) {
+        search.evaluate(leaf.moves, evaluate(&leaf.game));
     }
-
-    root_children
-        .map(|index| MoveVisits {
-            mv: tree.moves[index - 1],
-            visits: tree.nodes[index].visits,
-        })
-        .collect()
+    search.visits().collect()
 }
 
 /// Material-only leaf evaluation from the side to move.

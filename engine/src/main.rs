@@ -7,6 +7,7 @@ use std::{
 
 use chess_engine::{
     chess::Game,
+    matches::{self, Options},
     mcts::{material_value, search},
     self_play,
 };
@@ -15,7 +16,44 @@ fn run() -> Result<(), String> {
     let mut args = env::args().skip(1);
     let first = args
         .next()
-        .ok_or("usage: chess-engine SIMULATIONS [MOVE ...] | self-play OUTPUT_DIR GAMES SEED")?;
+        .ok_or("usage: chess-engine SIMULATIONS [MOVE ...] | self-play OUTPUT_DIR GAMES SEED | match [BATCH] [VISITS] [MAX_PAIRS] [SEED]")?;
+    if first == "match" {
+        let usage = "usage: chess-engine match [BATCH=8] [VISITS=800] [MAX_PAIRS=10000] [SEED=42]";
+        let batch = args
+            .next()
+            .as_deref()
+            .unwrap_or("8")
+            .parse()
+            .map_err(|_| "invalid batch")?;
+        let visits = args
+            .next()
+            .as_deref()
+            .unwrap_or("800")
+            .parse()
+            .map_err(|_| "invalid visits")?;
+        let max_pairs = args
+            .next()
+            .as_deref()
+            .unwrap_or("10000")
+            .parse()
+            .map_err(|_| "invalid max pairs")?;
+        let seed = args
+            .next()
+            .as_deref()
+            .unwrap_or("42")
+            .parse()
+            .map_err(|_| "invalid seed")?;
+        if args.next().is_some() {
+            return Err(usage.into());
+        }
+        return matches::run(Options {
+            batch,
+            visits,
+            max_pairs,
+            seed,
+        })
+        .map_err(|error| error.to_string());
+    }
     if first == "self-play" {
         let (Some(output), Some(games), Some(seed), None) =
             (args.next(), args.next(), args.next(), args.next())
