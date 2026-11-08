@@ -1,0 +1,11 @@
+[package]
+name = "chess-trainer"
+version = "0.1.0"
+edition.workspace = true
+
+[features]
+cuda = ["candle-core/cuda", "candle-nn/cuda"]
+
+[dependencies]
+candle-core.workspace = true
+candle-nn.workspace = true
