@@ -4,15 +4,13 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
-arrow-array = "58"
-arrow-schema = "58"
-parquet = { version = "58", default-features = false, features = ["arrow", "zstd"] }
 rand = "0.9"
 rand_chacha = "0.9"
 serde_json = "1"
 candle-core.workspace = true
 candle-nn.workspace = true
 chess-network = { path = "../network" }
+chess-data = { path = "../data" }
 
 [features]
 cuda = ["chess-network/cuda"]

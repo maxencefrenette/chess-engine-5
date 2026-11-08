@@ -9,9 +9,8 @@ cuda = ["candle-core/cuda", "candle-nn/cuda"]
 [dependencies]
 candle-core.workspace = true
 candle-nn.workspace = true
-arrow-array = "58"
-parquet = { version = "58", default-features = false, features = ["arrow", "zstd"] }
 rand = "0.9"
 rand_chacha = "0.9"
 serde_json = "1"
 chess-network = { path = "../network" }
+chess-data = { path = "../data" }

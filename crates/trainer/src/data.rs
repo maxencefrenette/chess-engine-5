@@ -1,16 +1,12 @@
-use std::{collections::BTreeSet, error::Error, fs::File, path::Path};
+use std::{collections::BTreeSet, path::Path};
 
-use arrow_array::{
-    Array, BinaryArray, FixedSizeBinaryArray, Int8Array, UInt8Array, UInt16Array, UInt64Array,
-};
 use candle_core::{Device, Tensor};
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+pub use chess_data::Result;
+use chess_data::{VISITS_PER_MOVE, read_shard};
 use rand::{SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha8Rng;
 
 use chess_network::{INPUTS, SQUARES, encode_position, move_indices};
-
-pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 pub struct Row {
     game_id: u64,
@@ -29,76 +25,40 @@ pub struct Dataset {
 
 pub fn load(shard: &Path, seed: u64) -> Result<Dataset> {
     let mut rows = Vec::new();
-    let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(shard)?)?.build()?;
-    for batch in reader {
-        let batch = batch?;
-        let column = |name: &str| {
-            batch
-                .column_by_name(name)
-                .filter(|column| column.null_count() == 0)
-                .ok_or_else(|| format!("missing or nullable data in {name}"))
-        };
-        macro_rules! typed {
-            ($name:literal, $ty:ty) => {
-                column($name)?
-                    .as_any()
-                    .downcast_ref::<$ty>()
-                    .ok_or(concat!("invalid Parquet type for ", $name))?
-            };
-        }
-        let ids = typed!("game_id", UInt64Array);
-        let ply = typed!("ply", UInt16Array);
-        let board = typed!("board", FixedSizeBinaryArray);
-        let castling = typed!("castling", UInt8Array);
-        let ep = typed!("ep_square", UInt8Array);
-        let clock = typed!("halfmove_clock", UInt8Array);
-        let repetitions = typed!("repetitions", UInt8Array);
-        let policy = typed!("policy_moves", BinaryArray);
-        let visits = typed!("policy_visits", BinaryArray);
-        let values = typed!("value", Int8Array);
-        if board.value_length() != 32 {
-            return Err("board must be 32 bytes".into());
-        }
-        for i in 0..batch.num_rows() {
-            let moves = decode_policy(policy.value(i), visits.value(i))?;
-            let board: &[u8; 32] = board.value(i).try_into()?;
-            let black_to_move = ply.value(i) % 2 != 0;
-            let mut features = Vec::with_capacity(SQUARES * INPUTS);
-            encode_position(
-                &mut features,
-                board,
-                black_to_move,
-                castling.value(i),
-                ep.value(i),
-                clock.value(i),
-                repetitions.value(i),
-            )
-            .ok_or("invalid piece code")?;
-            const MATERIAL: [i32; 13] = [0, 1, 3, 3, 5, 9, 0, -1, -3, -3, -5, -9, 0];
-            let white_material: i32 = board
-                .iter()
-                .map(|byte| MATERIAL[(byte & 15) as usize] + MATERIAL[(byte >> 4) as usize])
-                .sum();
-            let value = match values.value(i) {
-                -1 => 0,
-                0 => 1,
-                1 => 2,
-                _ => return Err("invalid game result".into()),
-            };
-            let material = if ply.value(i) % 2 == 0 {
-                white_material
-            } else {
-                -white_material
-            } as f32;
-            rows.push(Row {
-                game_id: ids.value(i),
-                features,
-                moves,
-                value,
-                material: material / (material.abs() + 8.0),
-            });
-        }
-    }
+    read_shard(shard, |row| {
+        let snapshot = row.position.snapshot;
+        let board = &snapshot.board;
+        let black_to_move = row.ply % 2 != 0;
+        let mut features = Vec::with_capacity(SQUARES * INPUTS);
+        encode_position(
+            &mut features,
+            board,
+            black_to_move,
+            snapshot.castling,
+            snapshot.ep_square,
+            snapshot.halfmove_clock,
+            snapshot.repetitions,
+        )
+        .ok_or("invalid piece code")?;
+        const MATERIAL: [i32; 13] = [0, 1, 3, 3, 5, 9, 0, -1, -3, -3, -5, -9, 0];
+        let white_material: i32 = board
+            .iter()
+            .map(|byte| MATERIAL[(byte & 15) as usize] + MATERIAL[(byte >> 4) as usize])
+            .sum();
+        let material = if black_to_move {
+            -white_material
+        } else {
+            white_material
+        } as f32;
+        rows.push(Row {
+            game_id: row.game_id,
+            features,
+            moves: row.position.policy,
+            value: (row.value + 1) as u32,
+            material: material / (material.abs() + 8.0),
+        });
+        Ok(())
+    })?;
 
     let mut games: Vec<_> = rows
         .iter()
@@ -122,28 +82,6 @@ pub fn load(shard: &Path, seed: u64) -> Result<Dataset> {
         train_games: games.len() - test_games,
         test_ids,
     })
-}
-
-fn decode_policy(moves: &[u8], visits: &[u8]) -> Result<Vec<(u16, u16)>> {
-    if moves.is_empty() || moves.len() != visits.len() || !moves.len().is_multiple_of(2) {
-        return Err("invalid packed policy lengths".into());
-    }
-    let pairs: Vec<_> = moves
-        .chunks_exact(2)
-        .zip(visits.chunks_exact(2))
-        .map(|(mv, count)| {
-            (
-                u16::from_le_bytes([mv[0], mv[1]]),
-                u16::from_le_bytes([count[0], count[1]]),
-            )
-        })
-        .collect();
-    if pairs.iter().map(|&(_, n)| u32::from(n)).sum::<u32>() != 800
-        || pairs.iter().any(|&(mv, _)| mv >> 12 > 4)
-    {
-        return Err("invalid move encoding or visit total".into());
-    }
-    Ok(pairs)
 }
 
 pub struct Batch {
@@ -184,7 +122,7 @@ impl Batch {
                 let index = i * width + j;
                 (move_index[index], promotion_index[index], promotes[index]) = move_indices(mv);
                 mask[index] = 0.;
-                policy[index] = f32::from(visits) / 800.;
+                policy[index] = f32::from(visits) / f32::from(VISITS_PER_MOVE);
             }
         }
         let shape = (size, width);

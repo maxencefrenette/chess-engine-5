@@ -1,43 +1,25 @@
 use std::{
-    env,
-    error::Error,
-    fs::{self, File},
+    env, fs,
     num::{NonZeroU32, NonZeroUsize},
     path::{Path, PathBuf},
-    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use arrow_array::{
-    Int8Array, RecordBatch, UInt8Array, UInt16Array, UInt64Array,
-    builder::{BinaryBuilder, FixedSizeBinaryBuilder},
-};
-use arrow_schema::{DataType, Field, Schema, SchemaRef};
-use parquet::{arrow::ArrowWriter, basic::Compression, file::properties::WriterProperties};
+use chess_data::{FORMAT_VERSION, Position, Result, RunWriter, VISITS_PER_MOVE};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde_json::json;
 
 use crate::{
-    chess::{Color, Game, Outcome, Snapshot},
+    chess::{Color, Game, Outcome},
     hybrid::Hybrid,
-    mcts::{MoveVisits, Search},
+    mcts::Search,
 };
 
-type Result<T> = std::result::Result<T, Box<dyn Error>>;
-
-const VISITS: NonZeroU32 = NonZeroU32::new(800).unwrap();
-const ROW_GROUP_ROWS: usize = 65_536;
-const SHARD_ROWS: usize = 4 * ROW_GROUP_ROWS;
-
-struct PositionRow {
-    snapshot: Snapshot,
-    policy: Vec<MoveVisits>,
-    played_move: u16,
-}
+const VISITS: NonZeroU32 = NonZeroU32::new(VISITS_PER_MOVE as u32).unwrap();
 
 struct PlayedGame {
-    positions: Vec<PositionRow>,
+    positions: Vec<Position>,
     white_value: i8,
 }
 
@@ -46,7 +28,7 @@ struct ActiveGame {
     game: Game,
     search: Search,
     rng: ChaCha8Rng,
-    positions: Vec<PositionRow>,
+    positions: Vec<Position>,
 }
 
 impl ActiveGame {
@@ -76,9 +58,17 @@ impl ActiveGame {
             .expect("root visits sum to the search budget")
             .mv;
         let legal_moves: Vec<_> = policy.iter().map(|entry| entry.mv).collect();
-        self.positions.push(PositionRow {
+        self.positions.push(Position {
             snapshot: self.game.snapshot(&legal_moves),
-            policy,
+            policy: policy
+                .into_iter()
+                .map(|entry| {
+                    (
+                        entry.mv.packed(),
+                        u16::try_from(entry.visits).expect("visits fit in u16"),
+                    )
+                })
+                .collect(),
             played_move: played.packed(),
         });
         self.game.play_legal(played);
@@ -130,107 +120,6 @@ fn play_batch(
     Ok(completed)
 }
 
-fn schema() -> SchemaRef {
-    Arc::new(Schema::new(vec![
-        Field::new("game_id", DataType::UInt64, false),
-        Field::new("ply", DataType::UInt16, false),
-        Field::new("board", DataType::FixedSizeBinary(32), false),
-        Field::new("castling", DataType::UInt8, false),
-        Field::new("ep_square", DataType::UInt8, false),
-        Field::new("halfmove_clock", DataType::UInt8, false),
-        Field::new("repetitions", DataType::UInt8, false),
-        Field::new("policy_moves", DataType::Binary, false),
-        Field::new("policy_visits", DataType::Binary, false),
-        Field::new("played_move", DataType::UInt16, false),
-        Field::new("value", DataType::Int8, false),
-    ]))
-}
-
-fn encode_game(schema: SchemaRef, game_id: u64, game: &PlayedGame) -> Result<RecordBatch> {
-    let rows = &game.positions;
-    let mut board = FixedSizeBinaryBuilder::with_capacity(rows.len(), 32);
-    let mut policy_moves = BinaryBuilder::new();
-    let mut policy_visits = BinaryBuilder::new();
-    let mut moves = Vec::new();
-    let mut visits = Vec::new();
-    for row in rows {
-        board.append_value(row.snapshot.board)?;
-        moves.clear();
-        visits.clear();
-        for entry in &row.policy {
-            moves.extend(entry.mv.packed().to_le_bytes());
-            visits.extend(u16::try_from(entry.visits)?.to_le_bytes());
-        }
-        policy_moves.append_value(&moves);
-        policy_visits.append_value(&visits);
-    }
-    Ok(RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(UInt64Array::from(vec![game_id; rows.len()])),
-            Arc::new(UInt16Array::from(
-                (0..u16::try_from(rows.len())?).collect::<Vec<_>>(),
-            )),
-            Arc::new(board.finish()),
-            Arc::new(UInt8Array::from_iter_values(
-                rows.iter().map(|row| row.snapshot.castling),
-            )),
-            Arc::new(UInt8Array::from_iter_values(
-                rows.iter().map(|row| row.snapshot.ep_square),
-            )),
-            Arc::new(UInt8Array::from_iter_values(
-                rows.iter().map(|row| row.snapshot.halfmove_clock),
-            )),
-            Arc::new(UInt8Array::from_iter_values(
-                rows.iter().map(|row| row.snapshot.repetitions),
-            )),
-            Arc::new(policy_moves.finish()),
-            Arc::new(policy_visits.finish()),
-            Arc::new(UInt16Array::from_iter_values(
-                rows.iter().map(|row| row.played_move),
-            )),
-            Arc::new(Int8Array::from_iter_values((0..rows.len()).map(|ply| {
-                if ply % 2 == 0 {
-                    game.white_value
-                } else {
-                    -game.white_value
-                }
-            }))),
-        ],
-    )?)
-}
-
-struct Shard {
-    writer: ArrowWriter<File>,
-    path: PathBuf,
-    partial: PathBuf,
-    rows: usize,
-}
-
-impl Shard {
-    fn create(run: &Path, index: usize, schema: SchemaRef) -> Result<Self> {
-        let path = run.join(format!("part-{index:05}.parquet"));
-        let partial = path.with_extension("parquet.partial");
-        let props = WriterProperties::builder()
-            .set_compression(Compression::ZSTD(Default::default()))
-            .set_max_row_group_row_count(Some(ROW_GROUP_ROWS))
-            .build();
-        let writer = ArrowWriter::try_new(File::create_new(&partial)?, schema, Some(props))?;
-        Ok(Self {
-            writer,
-            path,
-            partial,
-            rows: 0,
-        })
-    }
-
-    fn finish(self) -> Result<()> {
-        self.writer.close()?;
-        fs::rename(self.partial, self.path)?;
-        Ok(())
-    }
-}
-
 pub fn generate(
     root: &Path,
     games: NonZeroUsize,
@@ -238,16 +127,14 @@ pub fn generate(
     batch: NonZeroUsize,
     model: &Hybrid,
 ) -> Result<PathBuf> {
-    let version = root.join("v1");
+    let version = root.join(format!("v{FORMAT_VERSION}"));
     fs::create_dir_all(&version)?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let run = version.join(format!("{now}-{}", std::process::id()));
     fs::create_dir(&run)?;
     eprintln!("Writing self-play run to {}", run.display());
 
-    let schema = schema();
-    let mut shard_index = 0;
-    let mut shard = Shard::create(&run, shard_index, schema.clone())?;
+    let mut writer = RunWriter::new(&run);
     let mut positions = 0;
     let mut white_wins = 0;
     let mut black_wins = 0;
@@ -255,15 +142,8 @@ pub fn generate(
     for start in (0..games.get()).step_by(batch.get()) {
         let end = start.saturating_add(batch.get()).min(games.get());
         for (id, game) in play_batch(model, seed, start..end)? {
-            let batch = encode_game(schema.clone(), id as u64, &game)?;
-            if shard.rows > 0 && shard.rows + batch.num_rows() > SHARD_ROWS {
-                shard.finish()?;
-                shard_index += 1;
-                shard = Shard::create(&run, shard_index, schema.clone())?;
-            }
-            shard.writer.write(&batch)?;
-            shard.rows += batch.num_rows();
-            positions += batch.num_rows();
+            writer.write_game(id as u64, &game.positions, game.white_value)?;
+            positions += game.positions.len();
             match game.white_value {
                 1 => white_wins += 1,
                 -1 => black_wins += 1,
@@ -272,16 +152,16 @@ pub fn generate(
         }
         eprintln!("{end}/{} games, {positions} positions", games.get());
     }
-    shard.finish()?;
+    let shards = writer.finish()?;
 
     let manifest = json!({
-        "format_version": 1,
+        "format_version": FORMAT_VERSION,
         "seed": seed,
         "engine_version": env!("CARGO_PKG_VERSION"),
         "engine_revision": env::var("CE5_ENGINE_REVISION").ok(),
         "games": games.get(),
         "positions": positions,
-        "shards": shard_index + 1,
+        "shards": shards,
         "white_wins": white_wins,
         "black_wins": black_wins,
         "draws": draws,

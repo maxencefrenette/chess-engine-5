@@ -114,14 +114,6 @@ pub struct Game {
     halfmoves: u16,
 }
 
-pub(crate) struct Snapshot {
-    pub board: [u8; 32],
-    pub castling: u8,
-    pub ep_square: u8,
-    pub halfmove_clock: u8,
-    pub repetitions: u8,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Win(Color),
@@ -173,7 +165,7 @@ impl Game {
         self.outcome_with_moves(&self.legal_moves())
     }
 
-    pub(crate) fn snapshot(&self, moves: &[Move]) -> Snapshot {
+    pub(crate) fn snapshot(&self, moves: &[Move]) -> chess_data::Board {
         let mut board = [0; 32];
         for (square, piece) in self.position.board.iter().enumerate() {
             if let Some((color, piece)) = piece {
@@ -195,7 +187,7 @@ impl Game {
                 castling |= 1 << bit;
             }
         }
-        Snapshot {
+        chess_data::Board {
             board,
             castling,
             ep_square: self.position.en_passant.unwrap_or(64),
