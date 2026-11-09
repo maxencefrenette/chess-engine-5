@@ -1,4 +1,4 @@
-//! Chess Engine 5's Parquet v1 format, independent of search and training.
+//! Chess Engine 5's Parquet format, independent of search and training.
 
 mod reader;
 mod writer;
@@ -8,10 +8,10 @@ use std::{error::Error, sync::Arc};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 
 pub use reader::read_shard;
-pub use writer::RunWriter;
+pub use writer::write_shard;
 
-pub const FORMAT_VERSION: u32 = 1;
-pub const VISITS_PER_MOVE: u16 = 800;
+pub const FORMAT_VERSION: u32 = 2;
+const GENERATION_TIME_COLUMN: &str = "generation_ns_per_position";
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -39,10 +39,12 @@ pub struct Row {
     pub position: Position,
     /// Final result from the side-to-move perspective.
     pub value: i8,
+    /// Shard generation wall time divided by its position count, absent in v1.
+    pub generation_ns_per_position: Option<u64>,
 }
 
-fn schema() -> SchemaRef {
-    Arc::new(Schema::new(vec![
+fn schema(has_timing: bool) -> SchemaRef {
+    let mut fields = vec![
         Field::new("game_id", DataType::UInt64, false),
         Field::new("ply", DataType::UInt16, false),
         Field::new("board", DataType::FixedSizeBinary(32), false),
@@ -54,7 +56,11 @@ fn schema() -> SchemaRef {
         Field::new("policy_visits", DataType::Binary, false),
         Field::new("played_move", DataType::UInt16, false),
         Field::new("value", DataType::Int8, false),
-    ]))
+    ];
+    if has_timing {
+        fields.push(Field::new(GENERATION_TIME_COLUMN, DataType::UInt64, false));
+    }
+    Arc::new(Schema::new(fields))
 }
 
 #[cfg(test)]
@@ -72,13 +78,11 @@ mod tests {
                 halfmove_clock: ply,
                 repetitions: 1,
             },
-            policy: vec![(0x10ff, VISITS_PER_MOVE - 1), (0x0402, 1), (0x0003, 0)],
+            policy: vec![(0x10ff, 15), (0x0402, 1), (0x0003, 0)],
             played_move: 0x10ff,
         });
 
-        let mut writer = RunWriter::new(dir.path());
-        writer.write_game(123, &positions, 1)?;
-        assert_eq!(writer.finish()?, 1);
+        write_shard(dir.path(), 0, [(123, positions.as_slice(), 1)], 1234)?;
 
         let mut rows = Vec::new();
         read_shard(&dir.path().join("part-00000.parquet"), |row| {
@@ -91,6 +95,7 @@ mod tests {
             assert_eq!(row.ply, ply as u16);
             assert_eq!(row.value, if ply == 0 { 1 } else { -1 });
             assert_eq!(row.position, position);
+            assert_eq!(row.generation_ns_per_position, Some(1234));
         }
         Ok(())
     }

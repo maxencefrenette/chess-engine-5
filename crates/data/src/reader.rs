@@ -5,12 +5,13 @@ use arrow_array::{
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-use crate::{Board, Position, Result, Row, VISITS_PER_MOVE, schema};
+use crate::{Board, GENERATION_TIME_COLUMN, Position, Result, Row, schema};
 
 /// Decode a shard one Arrow batch at a time, visiting rows in file order.
 pub fn read_shard(path: &Path, mut visit: impl FnMut(Row) -> Result<()>) -> Result<()> {
     let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)?;
-    let expected = schema();
+    let has_timing = builder.schema().index_of(GENERATION_TIME_COLUMN).is_ok();
+    let expected = schema(has_timing);
     let mut indices = Vec::with_capacity(expected.fields().len());
     for field in expected.fields() {
         let index = builder.schema().index_of(field.name())?;
@@ -48,6 +49,11 @@ pub fn read_shard(path: &Path, mut visit: impl FnMut(Row) -> Result<()>) -> Resu
         let visits = next!(BinaryArray);
         let played_move = next!(UInt16Array);
         let values = next!(Int8Array);
+        let timing = if has_timing {
+            Some(next!(UInt64Array))
+        } else {
+            None
+        };
 
         for i in 0..batch.num_rows() {
             let value = values.value(i);
@@ -58,6 +64,7 @@ pub fn read_shard(path: &Path, mut visit: impl FnMut(Row) -> Result<()>) -> Resu
                 game_id: ids.value(i),
                 ply: ply.value(i),
                 value,
+                generation_ns_per_position: timing.map(|column| column.value(i)),
                 position: Position {
                     snapshot: Board {
                         board: board.value(i).try_into()?,
@@ -89,9 +96,8 @@ fn decode_policy(moves: &[u8], visits: &[u8]) -> Result<Vec<(u16, u16)>> {
             )
         })
         .collect();
-    if pairs.iter().map(|&(_, n)| u32::from(n)).sum::<u32>() != u32::from(VISITS_PER_MOVE)
-        || pairs.iter().any(|&(mv, _)| mv >> 12 > 4)
-    {
+    let total = pairs.iter().map(|&(_, n)| u64::from(n)).sum::<u64>();
+    if total == 0 || total > u64::from(u16::MAX) || pairs.iter().any(|&(mv, _)| mv >> 12 > 4) {
         return Err("invalid move encoding or visit total".into());
     }
     Ok(pairs)

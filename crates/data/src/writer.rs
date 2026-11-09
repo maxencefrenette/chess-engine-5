@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File},
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
 };
 
@@ -14,63 +14,38 @@ use parquet::{arrow::ArrowWriter, basic::Compression, file::properties::WriterPr
 use crate::{Position, Result, schema};
 
 const ROW_GROUP_ROWS: usize = 65_536;
-const SHARD_ROWS: usize = 4 * ROW_GROUP_ROWS;
 
-/// A Parquet run writer that keeps games whole and publishes each closed shard.
-pub struct RunWriter {
-    directory: PathBuf,
-    schema: SchemaRef,
-    shard: Option<Shard>,
-    shards: usize,
-}
-
-impl RunWriter {
-    pub fn new(directory: &Path) -> Self {
-        Self {
-            directory: directory.into(),
-            schema: schema(),
-            shard: None,
-            shards: 0,
-        }
-    }
-
-    pub fn write_game(
-        &mut self,
-        game_id: u64,
-        positions: &[Position],
-        white_value: i8,
-    ) -> Result<()> {
-        if positions.is_empty() || !(-1..=1).contains(&white_value) {
+/// Write whole games to one shard and publish it once the Parquet footer is complete.
+pub fn write_shard<'a>(
+    directory: &Path,
+    index: usize,
+    games: impl IntoIterator<Item = (u64, &'a [Position], i8)>,
+    generation_ns_per_position: u64,
+) -> Result<()> {
+    let schema = schema(true);
+    let path = directory.join(format!("part-{index:05}.parquet"));
+    let partial = path.with_extension("parquet.partial");
+    let props = WriterProperties::builder()
+        .set_compression(Compression::ZSTD(Default::default()))
+        .set_max_row_group_row_count(Some(ROW_GROUP_ROWS))
+        .build();
+    let mut writer =
+        ArrowWriter::try_new(File::create_new(&partial)?, schema.clone(), Some(props))?;
+    for (id, positions, value) in games {
+        if positions.is_empty() || !(-1..=1).contains(&value) {
             return Err("expected a non-empty game with a valid result".into());
         }
-        let batch = encode_game(self.schema.clone(), game_id, positions, white_value)?;
-        if self
-            .shard
-            .as_ref()
-            .is_some_and(|shard| shard.rows + batch.num_rows() > SHARD_ROWS)
-        {
-            self.shard.take().unwrap().finish()?;
-        }
-        if self.shard.is_none() {
-            self.shard = Some(Shard::create(
-                &self.directory,
-                self.shards,
-                self.schema.clone(),
-            )?);
-            self.shards += 1;
-        }
-        let shard = self.shard.as_mut().unwrap();
-        shard.writer.write(&batch)?;
-        shard.rows += batch.num_rows();
-        Ok(())
+        writer.write(&encode_game(
+            schema.clone(),
+            id,
+            positions,
+            value,
+            generation_ns_per_position,
+        )?)?;
     }
-
-    pub fn finish(self) -> Result<usize> {
-        if let Some(shard) = self.shard {
-            shard.finish()?;
-        }
-        Ok(self.shards)
-    }
+    writer.close()?;
+    fs::rename(partial, path)?;
+    Ok(())
 }
 
 fn encode_game(
@@ -78,6 +53,7 @@ fn encode_game(
     game_id: u64,
     rows: &[Position],
     white_value: i8,
+    generation_ns_per_position: u64,
 ) -> Result<RecordBatch> {
     let mut board = FixedSizeBinaryBuilder::with_capacity(rows.len(), 32);
     let mut policy_moves = BinaryBuilder::new();
@@ -127,37 +103,10 @@ fn encode_game(
                     -white_value
                 }
             }))),
+            Arc::new(UInt64Array::from(vec![
+                generation_ns_per_position;
+                rows.len()
+            ])),
         ],
     )?)
-}
-
-struct Shard {
-    writer: ArrowWriter<File>,
-    path: PathBuf,
-    partial: PathBuf,
-    rows: usize,
-}
-
-impl Shard {
-    fn create(run: &Path, index: usize, schema: SchemaRef) -> Result<Self> {
-        let path = run.join(format!("part-{index:05}.parquet"));
-        let partial = path.with_extension("parquet.partial");
-        let props = WriterProperties::builder()
-            .set_compression(Compression::ZSTD(Default::default()))
-            .set_max_row_group_row_count(Some(ROW_GROUP_ROWS))
-            .build();
-        let writer = ArrowWriter::try_new(File::create_new(&partial)?, schema, Some(props))?;
-        Ok(Self {
-            writer,
-            path,
-            partial,
-            rows: 0,
-        })
-    }
-
-    fn finish(self) -> Result<()> {
-        self.writer.close()?;
-        fs::rename(self.partial, self.path)?;
-        Ok(())
-    }
 }

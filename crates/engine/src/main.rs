@@ -10,7 +10,7 @@ use chess_engine::{
 
 const USAGE: &str = "usage: chess-engine [--cuda] <command>
   search MODEL_DIR VISITS [MOVE ...]
-  self-play MODEL_DIR OUTPUT_DIR GAMES SEED [BATCH=16]
+  self-play [--config PATH] [--set KEY=VALUE]...
   eval-model <gainer|non-regression> CANDIDATE_DIR [--config PATH] [--set KEY=VALUE]...";
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -48,24 +48,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             &settings,
         )?);
     }
-    let model = args.next().ok_or(USAGE)?;
-
+    if command == "self-play" && device == "cpu" {
+        let config: self_play::Config = chess_config::load("config/datagen.toml", args)?;
+        let model = Hybrid::load(&config.model, &config.device)?;
+        let run = self_play::generate(&config, &model, &Settings::load()?)?;
+        println!("{}", run.display());
+        return Ok(());
+    }
     match command.as_str() {
-        "self-play" => {
-            let output = args.next().ok_or(USAGE)?;
-            let games = args.next().ok_or(USAGE)?.parse()?;
-            let seed = args.next().ok_or(USAGE)?.parse()?;
-            let batch = args.next().as_deref().unwrap_or("16").parse()?;
-            if args.next().is_some() {
-                return Err(USAGE.into());
-            }
-            let model = Hybrid::load(Path::new(&model), device)?;
-            let settings = Settings::load()?;
-            let run =
-                self_play::generate(Path::new(&output), games, seed, batch, &model, &settings)?;
-            println!("{}", run.display());
-        }
         "search" => {
+            let model = args.next().ok_or(USAGE)?;
             let visits = args.next().ok_or(USAGE)?.parse()?;
             let mut game = Game::default();
             for name in args {

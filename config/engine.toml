@@ -1,9 +1,6 @@
 # PUCT exploration constant shared by search, self-play, and evaluation.
 exploration = 1.4
 
-# Zero picks the most visited move. One samples in proportion to visits.
-self_play_temperature = 1.0
-
 # Model evaluation uses this temperature for the first N plies, then plays greedily.
 eval_temperature = 1.0
 eval_sampling_plies = 4

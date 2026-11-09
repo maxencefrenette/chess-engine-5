@@ -1,8 +1,8 @@
-use std::{collections::BTreeSet, path::Path};
+use std::{collections::BTreeSet, fs, path::Path};
 
 use candle_core::{Device, Tensor};
 pub use chess_data::Result;
-use chess_data::{VISITS_PER_MOVE, read_shard};
+use chess_data::read_shard;
 use rand::{SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha8Rng;
 
@@ -15,6 +15,7 @@ pub struct Row {
     game_id: u64,
     features: Vec<f32>,
     moves: Vec<(u16, u16)>,
+    total_visits: f32,
     pub value: u32,
     piece_features: [f32; PIECE_FEATURES],
 }
@@ -26,32 +27,53 @@ pub struct Dataset {
     pub test_ids: Vec<u64>,
 }
 
-pub fn load(shard: &Path, seed: u64) -> Result<Dataset> {
+pub fn load(dataset: &Path, seed: u64) -> Result<Dataset> {
+    let shards = if dataset.is_dir() {
+        let mut shards = Vec::new();
+        for entry in fs::read_dir(dataset)? {
+            let path = entry?.path();
+            if path.extension().is_some_and(|ext| ext == "parquet") && path.is_file() {
+                shards.push(path);
+            }
+        }
+        shards.sort_unstable();
+        shards
+    } else {
+        vec![dataset.into()]
+    };
     let mut rows = Vec::new();
-    read_shard(shard, |row| {
-        let snapshot = row.position.snapshot;
-        let board = &snapshot.board;
-        let black_to_move = row.ply % 2 != 0;
-        let mut features = Vec::with_capacity(SQUARES * INPUTS);
-        encode_position(
-            &mut features,
-            board,
-            black_to_move,
-            snapshot.castling,
-            snapshot.ep_square,
-            snapshot.halfmove_clock,
-            snapshot.repetitions,
-        )
-        .ok_or("invalid piece code")?;
-        rows.push(Row {
-            game_id: row.game_id,
-            features,
-            moves: row.position.policy,
-            value: (row.value + 1) as u32,
-            piece_features: piece_features(board, black_to_move),
-        });
-        Ok(())
-    })?;
+    for shard in shards {
+        read_shard(&shard, |row| {
+            let snapshot = row.position.snapshot;
+            let board = &snapshot.board;
+            let black_to_move = row.ply % 2 != 0;
+            let mut features = Vec::with_capacity(SQUARES * INPUTS);
+            encode_position(
+                &mut features,
+                board,
+                black_to_move,
+                snapshot.castling,
+                snapshot.ep_square,
+                snapshot.halfmove_clock,
+                snapshot.repetitions,
+            )
+            .ok_or("invalid piece code")?;
+            rows.push(Row {
+                game_id: row.game_id,
+                features,
+                total_visits: row
+                    .position
+                    .policy
+                    .iter()
+                    .map(|&(_, visits)| f32::from(visits))
+                    .sum(),
+                moves: row.position.policy,
+                value: (row.value + 1) as u32,
+                piece_features: piece_features(board, black_to_move),
+            });
+            Ok(())
+        })?;
+    }
 
     let mut games: Vec<_> = rows
         .iter()
@@ -110,7 +132,7 @@ impl Batch {
                 let index = i * width + j;
                 (move_index[index], promotion_index[index], promotes[index]) = move_indices(mv);
                 mask[index] = 0.;
-                policy[index] = f32::from(visits) / f32::from(VISITS_PER_MOVE);
+                policy[index] = f32::from(visits) / row.total_visits;
             }
         }
         let shape = (size, width);

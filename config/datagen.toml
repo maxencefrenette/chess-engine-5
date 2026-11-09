@@ -1,0 +1,9 @@
+model = "/data/chess/chess-engine-5/models/smolgen-v1-1000games-policy-piece-wdl-seed42"
+output_dir = "/data/chess/chess-engine-5/training-data"
+device = "cuda"
+total_games = 5000
+games_per_shard = 1000
+batch = 16
+visits_per_move = 800
+seed = 42
+temperature = 1.0
