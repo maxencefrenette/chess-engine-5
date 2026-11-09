@@ -4,18 +4,13 @@ use candle_core::{DType, Device, Tensor, safetensors};
 use candle_nn::VarBuilder;
 use serde_json::{Value, json};
 
-use crate::{INPUTS, ModelConfig, Net};
+use crate::{
+    INPUTS, ModelConfig, Net,
+    piece_value::{CpuPieceValue, PREFIX, PieceValue},
+};
 
 const CONFIG_FILE: &str = "config.json";
 const WEIGHTS_FILE: &str = "weights.safetensors";
-const VALUE_WEIGHT: &str = "piece_count_value.weight";
-const VALUE_BIAS: &str = "piece_count_value.bias";
-const MATERIAL_HINT: &str = "stm_material_squash_8_value_residual_v1";
-
-pub struct PieceValue {
-    pub weight: [[f32; 10]; 3],
-    pub bias: [f32; 3],
-}
 
 fn format_fields() -> [(&'static str, Value); 6] {
     [
@@ -28,9 +23,8 @@ fn format_fields() -> [(&'static str, Value); 6] {
     ]
 }
 
-pub fn config(model: ModelConfig, material_hint: bool, training: Value) -> Value {
+pub fn config(model: ModelConfig, training: Value) -> Value {
     let mut config = json!({
-        "material_hint": material_hint.then_some(MATERIAL_HINT),
         "value_order": ["loss", "draw", "win"],
         "training": training,
         "model": model,
@@ -43,7 +37,6 @@ pub fn config(model: ModelConfig, material_hint: bool, training: Value) -> Value
 
 pub struct Checkpoint {
     tensors: HashMap<String, Tensor>,
-    material_hint: bool,
     model: ModelConfig,
 }
 
@@ -64,13 +57,13 @@ impl Checkpoint {
         if config["value_order"] != json!(["loss", "draw", "win"]) {
             return Err(io::Error::other("unsupported checkpoint value order"));
         }
-        let material_hint = match &config["material_hint"] {
-            Value::Null => false,
-            hint if hint == MATERIAL_HINT => true,
-            _ => return Err(io::Error::other("unsupported material hint")),
-        };
-        let model = if let Some(model) = config.get("model") {
-            serde_json::from_value(model.clone())?
+        let model = if let Some(mut model) = config.get("model").cloned() {
+            // Older checkpoints describe an auxiliary head unused during play.
+            if let Some(fields) = model.as_object_mut() {
+                fields.remove("value_channels");
+                fields.remove("value_hidden_width");
+            }
+            serde_json::from_value(model)?
         } else {
             ModelConfig {
                 width: serde_json::from_value(config["width"].clone())?,
@@ -81,59 +74,43 @@ impl Checkpoint {
         };
         let tensors =
             safetensors::load(directory.join(WEIGHTS_FILE), device).map_err(io::Error::other)?;
-        Ok(Self {
-            tensors,
-            material_hint,
-            model,
-        })
+        Ok(Self { tensors, model })
     }
 
-    pub fn value(&self) -> io::Result<PieceValue> {
-        let vb = |name| {
-            self.tensors
-                .get(name)
-                .ok_or_else(|| io::Error::other(format!("missing tensor {name}")))
-        };
-        let weight = vb(VALUE_WEIGHT)?
-            .to_vec2::<f32>()
-            .map_err(io::Error::other)?;
-        let bias = vb(VALUE_BIAS)?.to_vec1::<f32>().map_err(io::Error::other)?;
-        let [loss, draw, win] = weight
-            .try_into()
-            .map_err(|_| io::Error::other("invalid piece-count weight shape"))?;
-        let row = |values: Vec<f32>| {
-            values
-                .try_into()
-                .map_err(|_| io::Error::other("invalid piece-count weight shape"))
-        };
-        let weight = [row(loss)?, row(draw)?, row(win)?];
-        let bias = bias
-            .try_into()
-            .map_err(|_| io::Error::other("invalid piece-count bias shape"))?;
-        Ok(PieceValue { weight, bias })
+    fn value_tensors(&self, device: &Device) -> candle_core::Result<HashMap<String, Tensor>> {
+        ["weight", "bias"]
+            .into_iter()
+            .map(|field| {
+                let name = format!("{PREFIX}.{field}");
+                let tensor = self
+                    .tensors
+                    .get(&name)
+                    .ok_or_else(|| candle_core::Error::Msg(format!("missing tensor {name}")))?;
+                Ok((name, tensor.to_device(device)?))
+            })
+            .collect()
+    }
+
+    pub fn value(&self) -> candle_core::Result<CpuPieceValue> {
+        let device = &Device::Cpu;
+        PieceValue::new(VarBuilder::from_tensors(
+            self.value_tensors(device)?,
+            DType::F32,
+            device,
+        ))?
+        .into_cpu()
     }
 
     pub fn into_policy(self, device: &Device) -> candle_core::Result<Net> {
         Net::new(
             VarBuilder::from_tensors(self.tensors, DType::F32, device),
             self.model,
-            self.material_hint,
         )
     }
 }
 
 /// Save a policy and its playing value model together. Publish config last.
-pub fn save(
-    directory: &Path,
-    mut tensors: HashMap<String, Tensor>,
-    value: &PieceValue,
-    config: &Value,
-) -> io::Result<()> {
-    let device = &Device::Cpu;
-    let weight = Tensor::new(&value.weight, device).map_err(io::Error::other)?;
-    let bias = Tensor::new(&value.bias, device).map_err(io::Error::other)?;
-    tensors.insert(VALUE_WEIGHT.into(), weight);
-    tensors.insert(VALUE_BIAS.into(), bias);
+pub fn save(directory: &Path, tensors: HashMap<String, Tensor>, config: &Value) -> io::Result<()> {
     fs::create_dir(directory)?;
     safetensors::save(&tensors, directory.join(WEIGHTS_FILE)).map_err(io::Error::other)?;
     fs::write(directory.join(CONFIG_FILE), format!("{config:#}\n"))

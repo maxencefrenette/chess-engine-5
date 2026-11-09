@@ -6,14 +6,17 @@ use chess_data::{VISITS_PER_MOVE, read_shard};
 use rand::{SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha8Rng;
 
-use chess_network::{INPUTS, SQUARES, encode_position, move_indices};
+use chess_network::{
+    INPUTS, SQUARES, encode_position, move_indices,
+    piece_value::{PIECE_FEATURES, feature_tensor, piece_features},
+};
 
 pub struct Row {
     game_id: u64,
     features: Vec<f32>,
     moves: Vec<(u16, u16)>,
     pub value: u32,
-    material: f32,
+    piece_features: [f32; PIECE_FEATURES],
 }
 
 pub struct Dataset {
@@ -40,22 +43,12 @@ pub fn load(shard: &Path, seed: u64) -> Result<Dataset> {
             snapshot.repetitions,
         )
         .ok_or("invalid piece code")?;
-        const MATERIAL: [i32; 13] = [0, 1, 3, 3, 5, 9, 0, -1, -3, -3, -5, -9, 0];
-        let white_material: i32 = board
-            .iter()
-            .map(|byte| MATERIAL[(byte & 15) as usize] + MATERIAL[(byte >> 4) as usize])
-            .sum();
-        let material = if black_to_move {
-            -white_material
-        } else {
-            white_material
-        } as f32;
         rows.push(Row {
             game_id: row.game_id,
             features,
             moves: row.position.policy,
             value: (row.value + 1) as u32,
-            material: material / (material.abs() + 8.0),
+            piece_features: piece_features(board, black_to_move),
         });
         Ok(())
     })?;
@@ -89,20 +82,15 @@ pub struct Batch {
     pub move_index: Tensor,
     pub promotion_index: Tensor,
     pub promotes: Tensor,
-    pub material: Option<Tensor>,
     pub mask: Tensor,
     pub policy: Tensor,
     pub value: Tensor,
+    pub piece_features: Tensor,
     pub uniform_loss: f64,
 }
 
 impl Batch {
-    pub fn new(
-        rows: &[Row],
-        indices: &[usize],
-        device: &Device,
-        material_hint: bool,
-    ) -> candle_core::Result<Self> {
+    pub fn new(rows: &[Row], indices: &[usize], device: &Device) -> candle_core::Result<Self> {
         let size = indices.len();
         let width = indices.iter().map(|&i| rows[i].moves.len()).max().unwrap();
         let mut positions = Vec::with_capacity(size * SQUARES * INPUTS);
@@ -131,15 +119,16 @@ impl Batch {
             move_index: Tensor::from_vec(move_index, shape, device)?,
             promotion_index: Tensor::from_vec(promotion_index, shape, device)?,
             promotes: Tensor::from_vec(promotes, shape, device)?,
-            material: material_hint
-                .then(|| {
-                    let values: Vec<_> = indices.iter().map(|&i| rows[i].material).collect();
-                    Tensor::from_vec(values, (size, 1), device)
-                })
-                .transpose()?,
             mask: Tensor::from_vec(mask, shape, device)?,
             policy: Tensor::from_vec(policy, shape, device)?,
             value: Tensor::from_vec(value, size, device)?,
+            piece_features: feature_tensor(
+                &indices
+                    .iter()
+                    .map(|&i| rows[i].piece_features)
+                    .collect::<Vec<_>>(),
+                device,
+            )?,
             uniform_loss,
         })
     }

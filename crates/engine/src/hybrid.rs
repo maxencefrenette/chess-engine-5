@@ -5,9 +5,8 @@ use std::{
 
 use candle_core::{Device, Tensor};
 use chess_network::{
-    INPUTS, Net, SQUARES,
-    checkpoint::{Checkpoint, PieceValue},
-    encode_position, move_indices,
+    INPUTS, Net, SQUARES, checkpoint::Checkpoint, encode_position, move_indices,
+    piece_value::CpuPieceValue,
 };
 
 use crate::{
@@ -22,7 +21,7 @@ pub(crate) struct Evaluation {
 
 pub struct Hybrid {
     policy: Net,
-    value: PieceValue,
+    value: CpuPieceValue,
     device: Device,
     pub(crate) model_dir: PathBuf,
 }
@@ -36,7 +35,7 @@ impl Hybrid {
             _ => return Err(io::Error::other("device must be cpu or cuda")),
         };
         let checkpoint = Checkpoint::load(model_dir, &device)?;
-        let value = checkpoint.value()?;
+        let value = checkpoint.value().map_err(io::Error::other)?;
         let policy = checkpoint.into_policy(&device).map_err(io::Error::other)?;
         Ok(Self {
             policy,
@@ -74,7 +73,7 @@ impl Hybrid {
                 snapshot.repetitions,
             )
             .expect("engine snapshot has valid pieces");
-            values.push(self.value_for(&snapshot.board, black));
+            values.push(self.value.evaluate(&snapshot.board, black));
             for (j, mv) in leaf.moves.iter().enumerate() {
                 let k = i * width + j;
                 (moves[k], promotions[k], promotes[k]) = move_indices(mv.packed());
@@ -91,32 +90,6 @@ impl Hybrid {
             .to_vec2()
     }
 
-    fn value_for(&self, board: &[u8; 32], black: bool) -> f32 {
-        let mut pieces = [0.; 10];
-        for byte in board {
-            for piece in [byte & 15, byte >> 4] {
-                let side = usize::from(piece > 6);
-                let kind = usize::from(piece).saturating_sub(side * 6);
-                if (1..=5).contains(&kind) {
-                    pieces[(side ^ usize::from(black)) * 5 + kind - 1] += 1.;
-                }
-            }
-        }
-        let normalized = pieces
-            .into_iter()
-            .zip([8., 2., 2., 2., 1., 8., 2., 2., 2., 1.])
-            .map(|(n, scale)| n / scale);
-        let mut logits = self.value.bias;
-        for (logit, weights) in logits.iter_mut().zip(&self.value.weight) {
-            *logit += weights
-                .iter()
-                .zip(normalized.clone())
-                .map(|(w, x)| w * x)
-                .sum::<f32>();
-        }
-        normalize(&mut logits);
-        logits[2] - logits[0]
-    }
     pub fn search(
         &self,
         game: &Game,

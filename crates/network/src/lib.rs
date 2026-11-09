@@ -1,4 +1,5 @@
 pub mod checkpoint;
+pub mod piece_value;
 
 use candle_core::{Result, Tensor};
 use candle_nn::{
@@ -19,8 +20,6 @@ pub struct ModelConfig {
     pub smolgen_hidden: usize,
     pub smolgen_head_width: usize,
     pub policy_width: usize,
-    pub value_channels: usize,
-    pub value_hidden_width: usize,
 }
 
 impl Default for ModelConfig {
@@ -35,8 +34,6 @@ impl Default for ModelConfig {
             smolgen_hidden: 64,
             smolgen_head_width: 8,
             policy_width: 32,
-            value_channels: 4,
-            value_hidden_width: 64,
         }
     }
 }
@@ -52,8 +49,6 @@ impl ModelConfig {
             self.smolgen_hidden,
             self.smolgen_head_width,
             self.policy_width,
-            self.value_channels,
-            self.value_hidden_width,
         ]
         .contains(&0)
             || !self.width.is_multiple_of(self.heads)
@@ -189,14 +184,10 @@ pub struct Net {
     policy_query: Linear,
     policy_key: Linear,
     promotion: Linear,
-    value_square: Linear,
-    value_hidden: Linear,
-    value_out: Linear,
-    material_hint: Option<Linear>,
 }
 
 impl Net {
-    pub fn new(vb: VarBuilder, config: ModelConfig, material_hint: bool) -> Result<Self> {
+    pub fn new(vb: VarBuilder, config: ModelConfig) -> Result<Self> {
         config.validate()?;
         Ok(Self {
             config,
@@ -220,46 +211,7 @@ impl Net {
             policy_query: linear(config.width, config.policy_width, vb.pp("policy_query"))?,
             policy_key: linear(config.width, config.policy_width, vb.pp("policy_key"))?,
             promotion: linear_no_bias(config.policy_width, 4, vb.pp("promotion"))?,
-            value_square: linear(config.width, config.value_channels, vb.pp("value_square"))?,
-            value_hidden: linear(
-                SQUARES * config.value_channels,
-                config.value_hidden_width,
-                vb.pp("value_hidden"),
-            )?,
-            value_out: linear(config.value_hidden_width, 3, vb.pp("value_out"))?,
-            // Start the residual at zero so the hinted and plain nets have the same initial function.
-            material_hint: material_hint
-                .then(|| {
-                    vb.get_with_hints(
-                        (config.value_hidden_width, 1),
-                        "material_hint.weight",
-                        Init::Const(0.0),
-                    )
-                    .map(|weight| Linear::new(weight, None))
-                })
-                .transpose()?,
         })
-    }
-
-    pub fn forward(
-        &self,
-        position: &Tensor,
-        move_index: &Tensor,
-        promotion_index: &Tensor,
-        promotes: &Tensor,
-        material: Option<&Tensor>,
-    ) -> Result<(Tensor, Tensor)> {
-        let x = self.encode(position)?;
-        let policy = self.legal_policy(&x, move_index, promotion_index, promotes)?;
-        let value = self.value_square.forward(&x)?.relu()?.flatten_from(1)?;
-        let mut value = self.value_hidden.forward(&value)?;
-        if let Some(projection) = &self.material_hint {
-            let material =
-                material.ok_or_else(|| candle_core::Error::Msg("missing material hint".into()))?;
-            value = (&value + projection.forward(material)?)?;
-        }
-        let value = self.value_out.forward(&value.relu()?)?;
-        Ok((policy, value))
     }
 
     pub fn policy(
@@ -355,26 +307,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn value_loss_reaches_smolgen_and_material_hint() -> Result<()> {
+    fn policy_loss_reaches_smolgen() -> Result<()> {
         let device = &Device::Cpu;
         let params = VarMap::new();
         let net = Net::new(
             VarBuilder::from_varmap(&params, DType::F32, device),
             ModelConfig::default(),
-            true,
         )?;
         let board = Tensor::randn(0f32, 1., (1, SQUARES, INPUTS), device)?;
         let moves = Tensor::zeros((1, 1), DType::U32, device)?;
         let promotes = Tensor::zeros((1, 1), DType::F32, device)?;
-        let material = Tensor::ones((1, 1), DType::F32, device)?;
-        let (_, value) = net.forward(&board, &moves, &moves, &promotes, Some(&material))?;
-        let grads = value.sum_all()?.backward()?;
+        let policy = net.policy(&board, &moves, &moves, &promotes)?;
+        let grads = policy.sum_all()?.backward()?;
         let params = params.data().lock().unwrap();
         for name in [
             "input.weight",
             "blocks.0.smolgen.compress.weight",
             "smolgen_projection.weight",
-            "material_hint.weight",
         ] {
             let grad = grads
                 .get(params[name].as_tensor())

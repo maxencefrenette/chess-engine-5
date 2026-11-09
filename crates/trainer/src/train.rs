@@ -2,10 +2,7 @@ use std::{num::NonZeroUsize, path::PathBuf, time::Instant};
 
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap, loss, ops::log_softmax};
-use chess_network::{
-    ModelConfig, Net,
-    checkpoint::{self, Checkpoint},
-};
+use chess_network::{ModelConfig, Net, checkpoint, piece_value::PieceValue};
 use rand::{SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha8Rng;
 use serde_json::json;
@@ -17,39 +14,41 @@ use crate::data::{self, Batch, Result};
 pub struct Config {
     dataset: PathBuf,
     output_dir: PathBuf,
-    value_from: PathBuf,
     pub device: String,
     epochs: NonZeroUsize,
     batch_size: NonZeroUsize,
     learning_rate: f64,
     seed: u64,
-    material_hint: bool,
     model: ModelConfig,
 }
 
-fn losses(net: &Net, batch: &Batch) -> candle_core::Result<(Tensor, Tensor)> {
-    let (policy, value) = net.forward(
+fn losses(
+    net: &Net,
+    playing_value: &PieceValue,
+    batch: &Batch,
+) -> candle_core::Result<[Tensor; 2]> {
+    let policy = net.policy(
         &batch.position,
         &batch.move_index,
         &batch.promotion_index,
         &batch.promotes,
-        batch.material.as_ref(),
     )?;
     let log_probs = log_softmax(&(&policy + &batch.mask)?, 1)?;
     let policy = (&log_probs * &batch.policy)?.sum(1)?.neg()?.mean_all()?;
-    Ok((policy, loss::cross_entropy(&value, &batch.value)?))
+    Ok([
+        policy,
+        loss::cross_entropy(&playing_value.logits(&batch.piece_features)?, &batch.value)?,
+    ])
 }
 
 pub fn run(config: Config, device: &Device) -> Result<()> {
     let Config {
         dataset,
         output_dir,
-        value_from,
         epochs,
         batch_size,
         learning_rate,
         seed,
-        material_hint,
         model,
         ..
     } = config;
@@ -60,7 +59,6 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     if output_dir.exists() {
         return Err(format!("output already exists: {}", output_dir.display()).into());
     }
-    let playing_value = Checkpoint::load(&value_from, &Device::Cpu)?.value()?;
     let started = Instant::now();
     let data = data::load(&dataset, seed)
         .map_err(|error| format!("dataset {}: {error}", dataset.display()))?;
@@ -78,8 +76,8 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     let net = Net::new(
         VarBuilder::from_varmap(&parameters, DType::F32, device),
         model,
-        material_hint,
     )?;
+    let playing_value = PieceValue::new(VarBuilder::from_varmap(&parameters, DType::F32, device))?;
     let mut optimizer = AdamW::new(
         parameters.all_vars(),
         ParamsAdamW {
@@ -94,8 +92,8 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         indices.shuffle(&mut rng);
         let mut totals = [0.; 2];
         for chunk in indices.chunks(batch_size) {
-            let batch = Batch::new(&data.train, chunk, device, material_hint)?;
-            let (policy, value) = losses(&net, &batch)?;
+            let batch = Batch::new(&data.train, chunk, device)?;
+            let [policy, value] = losses(&net, &playing_value, &batch)?;
             let objective = (&policy + &value)?;
             optimizer.backward_step(&objective)?;
             for (total, loss) in totals.iter_mut().zip([policy, value]) {
@@ -107,7 +105,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
             return Err("non-finite training loss".into());
         }
         println!(
-            "epoch {epoch}/{epochs}: train policy {policy:.4}, value {value:.4}, {:.1}s",
+            "epoch {epoch}/{epochs}: train policy {policy:.4}, WDL {value:.4}, {:.1}s",
             epoch_started.elapsed().as_secs_f64()
         );
     }
@@ -120,11 +118,9 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         .iter()
         .map(|(name, var)| (name.clone(), var.as_tensor().detach()))
         .collect();
-    let net = Net::new(
-        VarBuilder::from_tensors(tensors.clone(), DType::F32, device),
-        model,
-        material_hint,
-    )?;
+    let builder = VarBuilder::from_tensors(tensors.clone(), DType::F32, device);
+    let playing_value = PieceValue::new(builder.clone())?;
+    let net = Net::new(builder, model)?;
     let mut counts = [1.; 3];
     for row in &data.train {
         counts[row.value as usize] += 1.;
@@ -134,10 +130,10 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     let mut value_baseline = 0.;
     let indices: Vec<_> = (0..data.test.len()).collect();
     for chunk in indices.chunks(batch_size) {
-        let batch = Batch::new(&data.test, chunk, device, material_hint)?;
-        let (policy, value) = losses(&net, &batch)?;
-        totals[0] += f64::from(policy.to_scalar::<f32>()?) * chunk.len() as f64;
-        totals[1] += f64::from(value.to_scalar::<f32>()?) * chunk.len() as f64;
+        let batch = Batch::new(&data.test, chunk, device)?;
+        for (total, loss) in totals.iter_mut().zip(losses(&net, &playing_value, &batch)?) {
+            *total += f64::from(loss.to_scalar::<f32>()?) * chunk.len() as f64;
+        }
         totals[2] += batch.uniform_loss;
         for &row in chunk {
             value_baseline -= (counts[data.test[row].value as usize] / count_sum).ln();
@@ -154,9 +150,8 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         "test policy {policy:.4} vs uniform {uniform:.4}; test WDL {value:.4} vs prior {value_baseline:.4}"
     );
 
-    let mut config = checkpoint::config(
+    let config = checkpoint::config(
         model,
-        material_hint,
         json!({
                 "source": dataset,
                 "seed": seed,
@@ -177,8 +172,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
                 "prior_wdl_loss": value_baseline,
         }),
     );
-    config["value_from"] = json!(value_from);
-    checkpoint::save(&output_dir, tensors, &playing_value, &config)?;
+    checkpoint::save(&output_dir, tensors, &config)?;
     println!(
         "saved {} in {:.1}s",
         output_dir.display(),
