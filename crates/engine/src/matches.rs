@@ -63,6 +63,19 @@ impl ActiveGame {
     }
 }
 
+pub enum Mode {
+    Gainer,
+    NonRegression,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SprtPresets {
+    gainer: sprt::Config,
+    #[serde(rename = "non-regression")]
+    non_regression: sprt::Config,
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Options {
@@ -74,19 +87,33 @@ pub struct Options {
     visits: NonZeroU32,
     max_pairs: u64,
     seed: u64,
-    sprt: sprt::Config,
+    sprt: SprtPresets,
 }
 
-pub fn run(options: Options, players: [&Hybrid; 2], settings: &Settings) -> io::Result<()> {
+fn observed_elo([wins, draws, losses]: [u64; 3]) -> f64 {
+    let half_draws = draws as f64 / 2.0;
+    400.0 * ((wins as f64 + half_draws) / (losses as f64 + half_draws)).log10()
+}
+
+pub fn run(
+    options: Options,
+    mode: Mode,
+    players: [&Hybrid; 2],
+    settings: &Settings,
+) -> io::Result<()> {
     if options.batch == 0 || options.max_pairs == 0 || options.max_pairs > u64::MAX / 2 {
         return Err(io::Error::other(
             "batch must be positive and max pairs must be positive and fit twice in u64",
         ));
     }
-    if !options.sprt.validate() {
+    let sprt = match mode {
+        Mode::Gainer => options.sprt.gainer,
+        Mode::NonRegression => options.sprt.non_regression,
+    };
+    if !sprt.validate() {
         return Err(io::Error::other("invalid SPRT Elo bounds or error rates"));
     }
-    let (lower, upper) = options.sprt.boundaries();
+    let (lower, upper) = sprt.boundaries();
     let limit = 2 * options.max_pairs;
     let mut next_id = u64::from(options.batch).min(limit);
     let mut active: Vec<_> = (0..next_id)
@@ -100,10 +127,10 @@ pub fn run(options: Options, players: [&Hybrid; 2], settings: &Settings) -> io::
     let mut max_batches = [0; 2];
     println!(
         "checkpoint match; SPRT [{}, {}] logistic Elo, alpha={} beta={}; batch={} leaves_per_game={} visits={} max_pairs={} seed={}",
-        options.sprt.lower_elo,
-        options.sprt.upper_elo,
-        options.sprt.alpha,
-        options.sprt.beta,
+        sprt.lower_elo,
+        sprt.upper_elo,
+        sprt.alpha,
+        sprt.beta,
         options.batch,
         options.leaves_per_game,
         options.visits,
@@ -149,18 +176,19 @@ pub fn run(options: Options, players: [&Hybrid; 2], settings: &Settings) -> io::
             wdl[2 - first] += 1;
             wdl[2 - second] += 1;
             next_pair += 1;
-            llr = options.sprt.llr(counts);
+            llr = sprt.llr(counts);
             let decided = llr <= lower || llr >= upper;
             if next_pair.is_multiple_of(10) || decided {
                 println!(
-                    "pairs={next_pair} candidate W/D/L={wdl:?} pentanomial={counts:?} LLR={llr:.4}"
+                    "pairs={next_pair} candidate W/D/L={wdl:?} observed Elo={:+.1} pentanomial={counts:?} LLR={llr:.4}",
+                    observed_elo(wdl)
                 );
             }
             if decided {
                 let (hypothesis, elo) = if llr >= upper {
-                    ("H1", options.sprt.upper_elo)
+                    ("H1", sprt.upper_elo)
                 } else {
-                    ("H0", options.sprt.lower_elo)
+                    ("H0", sprt.lower_elo)
                 };
                 println!(
                     "accepted {hypothesis} ({elo:+} Elo); largest inference batches (baseline/candidate)={max_batches:?}"
@@ -188,7 +216,8 @@ pub fn run(options: Options, players: [&Hybrid; 2], settings: &Settings) -> io::
         }
     }
     println!(
-        "inconclusive at cap: pairs={next_pair} candidate W/D/L={wdl:?} pentanomial={counts:?} LLR={llr:.4}; largest inference batches (baseline/candidate)={max_batches:?}"
+        "inconclusive at cap: pairs={next_pair} candidate W/D/L={wdl:?} observed Elo={:+.1} pentanomial={counts:?} LLR={llr:.4}; largest inference batches (baseline/candidate)={max_batches:?}",
+        observed_elo(wdl)
     );
     Ok(())
 }

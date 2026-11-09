@@ -7,8 +7,14 @@ visits_per_move = 800
 max_pairs = 10000
 seed = 42
 
-[sprt]
+[sprt.gainer]
 lower_elo = 0.0
 upper_elo = 20.0
+alpha = 0.05
+beta = 0.05
+
+[sprt.non-regression]
+lower_elo = -20.0
+upper_elo = 0.0
 alpha = 0.05
 beta = 0.05

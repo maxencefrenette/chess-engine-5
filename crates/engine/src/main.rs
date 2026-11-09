@@ -3,7 +3,7 @@ use std::{env, path::Path, process::ExitCode};
 use chess_engine::{
     chess::Game,
     hybrid::Hybrid,
-    matches::{self, Options},
+    matches::{self, Mode, Options},
     self_play,
     settings::Settings,
 };
@@ -11,7 +11,7 @@ use chess_engine::{
 const USAGE: &str = "usage: chess-engine [--cuda] <command>
   search MODEL_DIR VISITS [MOVE ...]
   self-play MODEL_DIR OUTPUT_DIR GAMES SEED [BATCH=16]
-  eval-model CANDIDATE_DIR [--config PATH] [--set KEY=VALUE]...";
+  eval-model <gainer|non-regression> CANDIDATE_DIR [--config PATH] [--set KEY=VALUE]...";
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
@@ -22,6 +22,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         ("cpu", first)
     };
     if command == "eval-model" && device == "cpu" {
+        let mode = match args.next().as_deref() {
+            Some("gainer") => Mode::Gainer,
+            Some("non-regression") => Mode::NonRegression,
+            _ => return Err(USAGE.into()),
+        };
         let candidate_dir = args
             .next()
             .filter(|arg| !arg.starts_with("--"))
@@ -36,7 +41,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             candidate_dir,
             options.device
         );
-        return Ok(matches::run(options, [&baseline, &candidate], &settings)?);
+        return Ok(matches::run(
+            options,
+            mode,
+            [&baseline, &candidate],
+            &settings,
+        )?);
     }
     let model = args.next().ok_or(USAGE)?;
 
