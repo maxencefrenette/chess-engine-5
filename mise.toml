@@ -31,3 +31,7 @@ run = "mise run with-cuda -- cargo run --release --locked -p chess-engine --feat
 [tasks.train]
 description = "Train a model using the training configuration"
 run = "mise run with-cuda -- cargo run --locked -p chess-trainer --features cuda -- train"
+
+[tasks.update-model]
+description = "Set the model evaluation baseline to a checkpoint directory"
+run = "cargo run --locked -p chess-scripts -- update-model"

@@ -10,7 +10,7 @@ use chess_engine::{
 const USAGE: &str = "usage: chess-engine [--cuda] <command>
   search MODEL_DIR VISITS [MOVE ...]
   self-play MODEL_DIR OUTPUT_DIR GAMES SEED [BATCH=16]
-  eval-model [--config PATH] [--set KEY=VALUE]...";
+  eval-model CANDIDATE_DIR [--config PATH] [--set KEY=VALUE]...";
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
@@ -21,13 +21,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         ("cpu", first)
     };
     if command == "eval-model" && device == "cpu" {
+        let candidate_dir = args
+            .next()
+            .filter(|arg| !arg.starts_with("--"))
+            .ok_or(USAGE)?;
         let options: Options = chess_config::load("config/eval-model.toml", args)?;
         let baseline = Hybrid::load(&options.baseline_dir, &options.device)?;
-        let candidate = Hybrid::load(&options.candidate_dir, &options.device)?;
+        let candidate = Hybrid::load(Path::new(&candidate_dir), &options.device)?;
         println!(
             "baseline={} candidate={} device={}",
             options.baseline_dir.display(),
-            options.candidate_dir.display(),
+            candidate_dir,
             options.device
         );
         return Ok(matches::run(options, [&baseline, &candidate])?);

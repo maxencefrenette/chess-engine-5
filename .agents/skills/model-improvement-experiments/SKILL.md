@@ -12,8 +12,11 @@ This skill describes how to run and evaluate experiments that improve the model 
 To determine whether an experiment is successful, the new model must be run against the old model using the following command:
 
 ```sh
-mise run eval-model -- --set "baseline_dir=$baseline_dir" --set "candidate_dir=$candidate_dir"
+mise run eval-model -- "$candidate_dir"
 ```
 
-Evaluation defaults to `config/eval-model.toml`. To use another file, pass
-`--config PATH`. Repeat `--set KEY=VALUE` to override individual settings.
+After a successful experiment, update the baseline.
+
+```sh
+mise run update-model -- "$candidate_dir"
+```

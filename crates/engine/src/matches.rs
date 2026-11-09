@@ -75,7 +75,6 @@ impl ActiveGame {
 #[serde(deny_unknown_fields)]
 pub struct Options {
     pub baseline_dir: PathBuf,
-    pub candidate_dir: PathBuf,
     pub device: String,
     batch: u16,
     #[serde(rename = "visits_per_move")]
