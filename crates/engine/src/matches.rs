@@ -3,9 +3,10 @@ use std::{
     io,
     num::{NonZeroU16, NonZeroU32},
     path::PathBuf,
+    time::{Duration, Instant},
 };
 
-use rand::SeedableRng;
+use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::{
@@ -83,8 +84,7 @@ pub struct Options {
     pub device: String,
     batch: u16,
     leaves_per_game: NonZeroU16,
-    #[serde(rename = "visits_per_move")]
-    visits: NonZeroU32,
+    baseline_visits_per_move: NonZeroU32,
     max_pairs: u64,
     seed: u64,
     sprt: SprtPresets,
@@ -93,6 +93,58 @@ pub struct Options {
 fn observed_elo([wins, draws, losses]: [u64; 3]) -> f64 {
     let half_draws = draws as f64 / 2.0;
     400.0 * ((wins as f64 + half_draws) / (losses as f64 + half_draws)).log10()
+}
+
+fn time_matched_visits(
+    players: [&Hybrid; 2],
+    batch_size: usize,
+    baseline_visits: NonZeroU32,
+) -> io::Result<[NonZeroU32; 2]> {
+    const SAMPLES: usize = 31;
+    let mut rng = ChaCha8Rng::seed_from_u64(0);
+    let mut game = Game::default();
+    let mut batch = Vec::with_capacity(batch_size);
+    while batch.len() < batch_size {
+        // Use the same nonterminal positions and legal moves for both checkpoints.
+        let Some(leaf) = Search::new().next_leaf(&game, NonZeroU32::MIN, 0.0) else {
+            game = Game::default();
+            continue;
+        };
+        game.play_legal(leaf.moves[rng.random_range(0..leaf.moves.len())]);
+        batch.push((batch.len(), leaf));
+    }
+
+    for _ in 0..4 {
+        for player in players {
+            player.evaluate(&batch)?;
+        }
+    }
+    let mut timings = [[Duration::ZERO; SAMPLES]; 2];
+    for sample in 0..SAMPLES {
+        for offset in 0..2 {
+            let side = (sample + offset) % 2;
+            let start = Instant::now();
+            players[side].evaluate(&batch)?;
+            timings[side][sample] = start.elapsed();
+        }
+    }
+    let [baseline, candidate] = timings.map(|mut samples| {
+        samples.sort_unstable();
+        samples[SAMPLES / 2].as_secs_f64()
+    });
+    if baseline == 0.0 || candidate == 0.0 {
+        return Err(io::Error::other(
+            "inference benchmark measured zero elapsed time",
+        ));
+    }
+    let scaled = (f64::from(baseline_visits.get()) * baseline / candidate).round() as u32;
+    let candidate_visits = NonZeroU32::new(scaled).unwrap_or(NonZeroU32::MIN);
+    println!(
+        "inference benchmark: batch={batch_size} median baseline={:.3} ms candidate={:.3} ms; visits baseline={baseline_visits} candidate={candidate_visits}",
+        baseline * 1000.0,
+        candidate * 1000.0
+    );
+    Ok([baseline_visits, candidate_visits])
 }
 
 pub fn run(
@@ -113,6 +165,8 @@ pub fn run(
     if !sprt.validate() {
         return Err(io::Error::other("invalid SPRT Elo bounds or error rates"));
     }
+    let benchmark_batch = usize::from(options.batch) * usize::from(options.leaves_per_game.get());
+    let visits = time_matched_visits(players, benchmark_batch, options.baseline_visits_per_move)?;
     let (lower, upper) = sprt.boundaries();
     let limit = 2 * options.max_pairs;
     let mut next_id = u64::from(options.batch).min(limit);
@@ -126,14 +180,15 @@ pub fn run(
     let mut llr = 0.0;
     let mut max_batches = [0; 2];
     println!(
-        "checkpoint match; SPRT [{}, {}] logistic Elo, alpha={} beta={}; batch={} leaves_per_game={} visits={} max_pairs={} seed={}",
+        "checkpoint match; SPRT [{}, {}] logistic Elo, alpha={} beta={}; batch={} leaves_per_game={} visits baseline={} candidate={} max_pairs={} seed={}",
         sprt.lower_elo,
         sprt.upper_elo,
         sprt.alpha,
         sprt.beta,
         options.batch,
         options.leaves_per_game,
-        options.visits,
+        visits[0],
+        visits[1],
         options.max_pairs,
         options.seed
     );
@@ -142,12 +197,13 @@ pub fn run(
         let mut pending: [Vec<(usize, Leaf)>; 2] = [Vec::new(), Vec::new()];
         let mut finished = Vec::new();
         for (i, slot) in active.iter_mut().enumerate() {
-            let batch = &mut pending[slot.player()];
+            let side = slot.player();
+            let batch = &mut pending[side];
             let before = batch.len();
             for _ in 0..options.leaves_per_game.get() {
                 let Some(leaf) =
                     slot.search
-                        .next_leaf(&slot.game, options.visits, settings.exploration)
+                        .next_leaf(&slot.game, visits[side], settings.exploration)
                 else {
                     break;
                 };

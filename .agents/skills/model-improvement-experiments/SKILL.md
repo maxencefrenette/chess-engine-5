@@ -7,6 +7,10 @@ description: Plan, run, and interpret Chess Engine 5 experiments that change the
 
 This skill describes how to run and evaluate experiments that improve the model architecture or training recipes. Modifications to the training data or to the engine are out of scope.
 
+## Time budget
+
+Every training run should aim to take 5 minutes. Use the timed runtime printed by `mise run train`, which starts after data loading and setup and includes held-out evaluation and checkpoint saving. Rerun training outside the 285–315 second window with an adjusted step count. When a new configuration changes the time per step, calibrate its step count to finish in about 5 minutes.
+
 ## Sweeps
 
 When sweeping multiple training configurations, only pick the most promising candidate to evaluate against the baseline in a match.

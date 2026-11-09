@@ -59,7 +59,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     if output_dir.exists() {
         return Err(format!("output already exists: {}", output_dir.display()).into());
     }
-    let started = Instant::now();
+    let setup_started = Instant::now();
     let data = data::load(&dataset, seed)
         .map_err(|error| format!("dataset {}: {error}", dataset.display()))?;
     println!(
@@ -87,6 +87,10 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     )?;
     let mut indices: Vec<_> = (0..data.train.len()).collect();
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    device.synchronize()?;
+    let training_started = Instant::now();
+    let setup_seconds = training_started.duration_since(setup_started).as_secs_f64();
+    let mut optimizer_steps = 0usize;
     for epoch in 1..=epochs {
         let epoch_started = Instant::now();
         indices.shuffle(&mut rng);
@@ -96,6 +100,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
             let [policy, value] = losses(&net, &playing_value, &batch)?;
             let objective = (&policy + &value)?;
             optimizer.backward_step(&objective)?;
+            optimizer_steps += 1;
             for (total, loss) in totals.iter_mut().zip([policy, value]) {
                 *total += f64::from(loss.to_scalar::<f32>()?) * chunk.len() as f64;
             }
@@ -109,6 +114,11 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
             epoch_started.elapsed().as_secs_f64()
         );
     }
+    device.synchronize()?;
+    let evaluation_started = Instant::now();
+    let training_seconds = evaluation_started
+        .duration_since(training_started)
+        .as_secs_f64();
 
     // Load the trained parameters as constants so the test pass does not build a backward graph.
     let tensors: std::collections::HashMap<_, _> = parameters
@@ -149,6 +159,8 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     println!(
         "test policy {policy:.4} vs uniform {uniform:.4}; test WDL {value:.4} vs prior {value_baseline:.4}"
     );
+    device.synchronize()?;
+    let evaluation_seconds = evaluation_started.elapsed().as_secs_f64();
 
     let config = checkpoint::config(
         model,
@@ -158,6 +170,10 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
                 "epochs": epochs,
                 "batch_size": batch_size,
                 "learning_rate": learning_rate,
+                "optimizer_steps": optimizer_steps,
+                "setup_seconds": setup_seconds,
+                "training_seconds": training_seconds,
+                "evaluation_seconds": evaluation_seconds,
                 "device": if device.is_cuda() { "cuda" } else { "cpu" },
                 "dtype": "f32",
                 "layer_norm_backward": true,
@@ -173,10 +189,10 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         }),
     );
     checkpoint::save(&output_dir, tensors, &config)?;
+    let timed_seconds = training_started.elapsed().as_secs_f64();
+    println!("saved {}", output_dir.display());
     println!(
-        "saved {} in {:.1}s",
-        output_dir.display(),
-        started.elapsed().as_secs_f64()
+        "runtime: {timed_seconds:.2}s timed (training, held-out evaluation, and save); {setup_seconds:.2}s setup excluded; {optimizer_steps} optimizer steps ({training_seconds:.2}s training, {evaluation_seconds:.2}s held-out evaluation)"
     );
     Ok(())
 }
