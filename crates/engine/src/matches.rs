@@ -278,3 +278,23 @@ pub fn run(
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configured_baseline_checkpoint_loads_on_cpu() -> Result<(), Box<dyn std::error::Error>> {
+        let options: Options = chess_config::load(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/eval-model.toml"),
+            std::iter::empty(),
+        )?;
+        Hybrid::load(&options.baseline_dir, "cpu").map_err(|error| {
+            format!(
+                "loading baseline {}: {error}",
+                options.baseline_dir.display()
+            )
+        })?;
+        Ok(())
+    }
+}
