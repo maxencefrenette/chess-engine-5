@@ -6,8 +6,11 @@ description = "Run the Rust workspace tests"
 run = "cargo test --workspace --locked"
 
 [tasks.lint]
-description = "Run Clippy on the Rust workspace"
-run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
+description = "Run Clippy and project-specific Rust lints"
+run = [
+  "cargo clippy --workspace --all-targets --locked -- -D warnings",
+  "cargo run --locked -p chess-lints",
+]
 
 [tasks.with-cuda]
 hide = true

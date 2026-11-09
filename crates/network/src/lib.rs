@@ -20,7 +20,6 @@ pub struct ModelConfig {
     pub smolgen_hidden: usize,
     pub smolgen_head_width: usize,
     pub policy_width: usize,
-    #[serde(default)]
     pub disable_smolgen: bool,
 }
 
@@ -314,39 +313,4 @@ pub fn move_indices(mv: u16) -> (u32, u32, f32) {
         to * 4 + promotion.saturating_sub(1),
         f32::from(promotion != 0),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use candle_core::{DType, Device};
-    use candle_nn::VarMap;
-
-    use super::*;
-
-    #[test]
-    fn policy_loss_reaches_smolgen() -> Result<()> {
-        let device = &Device::Cpu;
-        let params = VarMap::new();
-        let net = Net::new(
-            VarBuilder::from_varmap(&params, DType::F32, device),
-            ModelConfig::default(),
-        )?;
-        let board = Tensor::randn(0f32, 1., (1, SQUARES, INPUTS), device)?;
-        let moves = Tensor::zeros((1, 1), DType::U32, device)?;
-        let promotes = Tensor::zeros((1, 1), DType::F32, device)?;
-        let policy = net.policy(&board, &moves, &moves, &promotes)?;
-        let grads = policy.sum_all()?.backward()?;
-        let params = params.data().lock().unwrap();
-        for name in [
-            "input.weight",
-            "blocks.0.smolgen.compress.weight",
-            "smolgen_projection.weight",
-        ] {
-            let grad = grads
-                .get(params[name].as_tensor())
-                .unwrap_or_else(|| panic!("no gradient for {name}"));
-            assert!(grad.abs()?.sum_all()?.to_scalar::<f32>()? > 0.0, "{name}");
-        }
-        Ok(())
-    }
 }

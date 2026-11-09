@@ -16,7 +16,6 @@ pub struct Config {
     output_dir: PathBuf,
     pub device: String,
     epochs: NonZeroUsize,
-    #[serde(default)]
     max_steps: usize,
     batch_size: NonZeroUsize,
     learning_rate: f64,
@@ -209,4 +208,44 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         "runtime: {timed_seconds:.2}s timed (training, held-out evaluation, and save); {setup_seconds:.2}s setup excluded; {optimizer_steps} optimizer steps ({training_seconds:.2}s training, {evaluation_seconds:.2}s held-out evaluation)"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use chess_network::{INPUTS, SQUARES};
+
+    use super::*;
+
+    #[test]
+    fn policy_loss_reaches_smolgen() -> Result<()> {
+        let mut config: Config = chess_config::load(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/training.toml"),
+            std::iter::empty(),
+        )?;
+        config.model.layers = 1;
+        config.model.disable_smolgen = false;
+        let device = &Device::Cpu;
+        let params = VarMap::new();
+        let net = Net::new(
+            VarBuilder::from_varmap(&params, DType::F32, device),
+            config.model,
+        )?;
+        let board = Tensor::randn(0f32, 1., (1, SQUARES, INPUTS), device)?;
+        let moves = Tensor::zeros((1, 1), DType::U32, device)?;
+        let promotes = Tensor::zeros((1, 1), DType::F32, device)?;
+        let policy = net.policy(&board, &moves, &moves, &promotes)?;
+        let grads = policy.sum_all()?.backward()?;
+        let params = params.data().lock().unwrap();
+        for name in [
+            "input.weight",
+            "blocks.0.smolgen.compress.weight",
+            "smolgen_projection.weight",
+        ] {
+            let grad = grads
+                .get(params[name].as_tensor())
+                .unwrap_or_else(|| panic!("no gradient for {name}"));
+            assert!(grad.abs()?.sum_all()?.to_scalar::<f32>()? > 0.0, "{name}");
+        }
+        Ok(())
+    }
 }
