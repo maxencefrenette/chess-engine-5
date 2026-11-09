@@ -7,12 +7,14 @@ max_steps = 0
 batch_size = 128
 seed = 42
 
-[adamw]
+[optimizer]
+kind = "adamw"
 learning_rate = 0.001
 beta1 = 0.9
 beta2 = 0.999
 eps = 1e-8
 weight_decay = 0.01
+schedule = { mode = "constant" }
 
 [model]
 width = 64

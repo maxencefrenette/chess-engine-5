@@ -17,9 +17,15 @@ pub struct Config {
     epochs: NonZeroUsize,
     max_steps: usize,
     batch_size: NonZeroUsize,
-    adamw: AdamWConfig,
+    optimizer: OptimizerConfig,
     seed: u64,
     model: ModelConfig,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+enum OptimizerConfig {
+    Adamw(AdamWConfig),
 }
 
 #[chess_config::toml_config]
@@ -30,6 +36,38 @@ struct AdamWConfig {
     beta2: f64,
     eps: f64,
     weight_decay: f64,
+    schedule: Schedule,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+enum Schedule {
+    Constant {},
+    Cosine {
+        warmup_fraction: f64,
+        min_ratio: f64,
+    },
+}
+
+impl Schedule {
+    fn multiplier(&self, step: usize, steps: usize) -> f64 {
+        match *self {
+            Self::Constant {} => 1.0,
+            Self::Cosine {
+                warmup_fraction,
+                min_ratio,
+            } => {
+                let warmup = ((steps as f64 * warmup_fraction).round() as usize).min(steps - 1);
+                if step < warmup {
+                    (step + 1) as f64 / warmup as f64
+                } else {
+                    let progress = (step - warmup) as f64 / (steps - warmup - 1).max(1) as f64;
+                    min_ratio
+                        + (1.0 - min_ratio) * (1.0 + (std::f64::consts::PI * progress).cos()) / 2.0
+                }
+            }
+        }
+    }
 }
 
 fn losses(
@@ -58,14 +96,23 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         epochs,
         max_steps,
         batch_size,
-        adamw,
+        optimizer: optimizer_config,
         seed,
         model,
         ..
     } = config;
+    let OptimizerConfig::Adamw(adamw) = &optimizer_config;
     let (epochs, batch_size) = (epochs.get(), batch_size.get());
     if !adamw.learning_rate.is_finite() || adamw.learning_rate <= 0. {
-        return Err("training adamw.learning_rate must be positive and finite".into());
+        return Err("training optimizer.learning_rate must be positive and finite".into());
+    }
+    if let Schedule::Cosine {
+        warmup_fraction,
+        min_ratio,
+    } = adamw.schedule
+        && (!(0.0..1.0).contains(&warmup_fraction) || !(0.0..=1.0).contains(&min_ratio))
+    {
+        return Err("cosine warmup_fraction must be in [0, 1) and min_ratio in [0, 1]".into());
     }
     if output_dir.exists() {
         return Err(format!("output already exists: {}", output_dir.display()).into());
@@ -100,6 +147,12 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         },
     )?;
     let mut indices: Vec<_> = (0..data.train.len()).collect();
+    let available_steps = indices.len().div_ceil(batch_size).saturating_mul(epochs);
+    let planned_steps = if max_steps == 0 {
+        available_steps
+    } else {
+        available_steps.min(max_steps)
+    };
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     device.synchronize()?;
     let training_started = Instant::now();
@@ -119,6 +172,9 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
             let batch = Batch::new(&data.train, chunk, device)?;
             let [policy, value] = losses(&net, &playing_value, &batch)?;
             let objective = (&policy + &value)?;
+            optimizer.set_learning_rate(
+                adamw.learning_rate * adamw.schedule.multiplier(optimizer_steps, planned_steps),
+            );
             optimizer.backward_step(&objective)?;
             optimizer_steps += 1;
             epoch_positions += chunk.len();
@@ -193,7 +249,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
                 "seed": seed,
                 "epochs": epochs,
                 "batch_size": batch_size,
-                "adamw": adamw,
+                "optimizer": optimizer_config,
                 "optimizer_steps": optimizer_steps,
                 "max_steps": max_steps,
                 "setup_seconds": setup_seconds,
@@ -228,6 +284,19 @@ mod tests {
     use chess_network::{INPUTS, SQUARES};
 
     use super::*;
+
+    #[test]
+    fn cosine_schedule_warms_up_and_reaches_its_floor() {
+        let schedule = Schedule::Cosine {
+            warmup_fraction: 0.05,
+            min_ratio: 0.1,
+        };
+        assert_eq!(schedule.multiplier(0, 100), 0.2);
+        assert_eq!(schedule.multiplier(4, 100), 1.0);
+        assert_eq!(schedule.multiplier(5, 100), 1.0);
+        assert!(schedule.multiplier(50, 100) < 1.0);
+        assert!((schedule.multiplier(99, 100) - 0.1).abs() < 1e-12);
+    }
 
     #[test]
     fn policy_loss_reaches_smolgen() -> Result<()> {
