@@ -23,23 +23,6 @@ pub struct ModelConfig {
     pub disable_smolgen: bool,
 }
 
-impl Default for ModelConfig {
-    fn default() -> Self {
-        // Dimensions of the original v1 checkpoints, before they saved all dimensions.
-        Self {
-            width: 64,
-            heads: 4,
-            layers: 2,
-            ffn_width: 128,
-            smolgen_compression: 2,
-            smolgen_hidden: 64,
-            smolgen_head_width: 8,
-            policy_width: 32,
-            disable_smolgen: false,
-        }
-    }
-}
-
 impl ModelConfig {
     fn validate(self) -> Result<()> {
         if [

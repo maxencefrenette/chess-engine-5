@@ -57,21 +57,10 @@ impl Checkpoint {
         if config["value_order"] != json!(["loss", "draw", "win"]) {
             return Err(io::Error::other("unsupported checkpoint value order"));
         }
-        let model = if let Some(mut model) = config.get("model").cloned() {
-            // Older checkpoints describe an auxiliary head unused during play.
-            if let Some(fields) = model.as_object_mut() {
-                fields.remove("value_channels");
-                fields.remove("value_hidden_width");
-            }
-            serde_json::from_value(model)?
-        } else {
-            ModelConfig {
-                width: serde_json::from_value(config["width"].clone())?,
-                heads: serde_json::from_value(config["heads"].clone())?,
-                layers: serde_json::from_value(config["blocks"].clone())?,
-                ..ModelConfig::default()
-            }
-        };
+        let model = config
+            .get("model")
+            .ok_or_else(|| io::Error::other("checkpoint is missing its model section"))?;
+        let model = serde_json::from_value(model.clone())?;
         let tensors =
             safetensors::load(directory.join(WEIGHTS_FILE), device).map_err(io::Error::other)?;
         Ok(Self { tensors, model })
