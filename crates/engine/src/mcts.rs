@@ -13,6 +13,7 @@ pub struct MoveVisits {
 #[derive(Default)]
 struct Node {
     visits: u32,
+    pending: u32,
     prior: f32,
     value_sum: f32,
     state: NodeState,
@@ -22,6 +23,7 @@ struct Node {
 enum NodeState {
     #[default]
     Unexpanded,
+    Pending,
     Terminal(f32),
     Branch(Range<usize>),
 }
@@ -45,28 +47,39 @@ impl Tree {
         self.nodes[index].state = NodeState::Branch(children);
     }
 
-    fn select(&self, parent: usize, children: Range<usize>, exploration: f32) -> usize {
-        let parent_scale = (self.nodes[parent].visits.max(1) as f32).sqrt();
+    fn select(&self, parent: usize, children: Range<usize>, exploration: f32) -> Option<usize> {
+        let parent = &self.nodes[parent];
+        let parent_scale = ((parent.visits + parent.pending).max(1) as f32).sqrt();
         children
+            .filter(|&child| !matches!(self.nodes[child].state, NodeState::Pending))
             .max_by(|&left, &right| {
                 self.score(left, exploration, parent_scale)
                     .total_cmp(&self.score(right, exploration, parent_scale))
                     .then_with(|| right.cmp(&left))
             })
-            .unwrap()
     }
 
     fn score(&self, child: usize, exploration: f32, parent_scale: f32) -> f32 {
         let node = &self.nodes[child];
-        // Child values are from the opponent's perspective.
-        let value = -node.value_sum / node.visits.max(1) as f32;
-        value + exploration * node.prior * parent_scale / (1.0 + node.visits as f32)
+        let visits = node.visits + node.pending;
+        // Child values are from the opponent's perspective, so +1 is a virtual loss.
+        let value = -(node.value_sum + node.pending as f32) / visits.max(1) as f32;
+        value + exploration * node.prior * parent_scale / (1.0 + visits as f32)
+    }
+
+    fn backup(&mut self, path: &[usize], mut value: f32) {
+        for &index in path.iter().rev() {
+            self.nodes[index].visits += 1;
+            self.nodes[index].value_sum += value;
+            value = -value;
+        }
     }
 }
 
 pub(crate) struct Leaf {
     pub game: Game,
     pub moves: Vec<Move>,
+    path: Vec<usize>,
 }
 
 pub(crate) struct Search {
@@ -87,7 +100,7 @@ impl Search {
 
     /// Advance through terminal simulations until there is an evaluation to do.
     pub fn next_leaf(&mut self, game: &Game, budget: NonZeroU32, exploration: f32) -> Option<Leaf> {
-        while self.tree.nodes[0].visits < budget.get() {
+        while self.tree.nodes[0].visits + self.tree.nodes[0].pending < budget.get() {
             self.path.clear();
             let mut position = game.clone();
             let mut index = 0;
@@ -95,10 +108,11 @@ impl Search {
                 self.path.push(index);
                 match &self.tree.nodes[index].state {
                     NodeState::Branch(children) => {
-                        index = self.tree.select(index, children.clone(), exploration);
+                        index = self.tree.select(index, children.clone(), exploration)?;
                         position.play_legal(self.tree.moves[index - 1]);
                     }
                     NodeState::Terminal(value) => break *value,
+                    NodeState::Pending => return None,
                     NodeState::Unexpanded => {
                         let moves = position.legal_moves();
                         if let Some(outcome) = position.outcome_with_moves(&moves) {
@@ -110,32 +124,33 @@ impl Search {
                             self.tree.nodes[index].state = NodeState::Terminal(value);
                             break value;
                         }
+                        self.tree.nodes[index].state = NodeState::Pending;
+                        for &node in &self.path {
+                            self.tree.nodes[node].pending += 1;
+                        }
                         return Some(Leaf {
                             game: position,
                             moves,
+                            path: std::mem::take(&mut self.path),
                         });
                     }
                 }
             };
-            self.backup(value);
+            self.tree.backup(&self.path, value);
         }
         None
     }
 
-    pub fn evaluate(&mut self, moves: Vec<Move>, value: f32, priors: &[f32]) {
-        let index = *self.path.last().expect("a leaf is pending");
-        self.tree.expand(index, moves, priors);
+    pub fn evaluate(&mut self, leaf: Leaf, value: f32, priors: &[f32]) {
+        let index = *leaf.path.last().expect("a leaf has a path");
+        for &node in &leaf.path {
+            self.tree.nodes[node].pending -= 1;
+        }
+        self.tree.expand(index, leaf.moves, priors);
         if index != 0 {
-            self.backup(value);
+            self.tree.backup(&leaf.path, value);
         }
-    }
-
-    fn backup(&mut self, mut value: f32) {
-        for &index in self.path.iter().rev() {
-            self.tree.nodes[index].visits += 1;
-            self.tree.nodes[index].value_sum += value;
-            value = -value;
-        }
+        self.path = leaf.path;
     }
 
     pub fn choose_move(&self, temperature: f64, rng: &mut impl Rng) -> Move {
@@ -203,15 +218,42 @@ mod tests {
         let mut priors = vec![0.; root.moves.len()];
         *priors.last_mut().unwrap() = 1.;
         let expected = *root.moves.last().unwrap();
-        search.evaluate(root.moves, 0., &priors);
+        search.evaluate(root, 0., &priors);
         let child = search.next_leaf(&game, budget, 1.4).unwrap();
         let priors = vec![1. / child.moves.len() as f32; child.moves.len()];
-        search.evaluate(child.moves, 0., &priors);
+        search.evaluate(child, 0., &priors);
         assert!(search.next_leaf(&game, budget, 1.4).is_none());
         let visited: Vec<_> = search.visits().filter(|entry| entry.visits != 0).collect();
         assert_eq!(visited.len(), 1);
         assert_eq!(visited[0].mv, expected);
         assert_eq!(visited[0].visits, 1);
+    }
+
+    #[test]
+    fn pending_leaves_are_distinct_and_reserve_the_visit_budget() {
+        let game = Game::default();
+        let budget = NonZeroU32::new(2).unwrap();
+        let mut search = Search::new();
+        let root = search.next_leaf(&game, budget, 1.4).unwrap();
+        assert!(search.next_leaf(&game, budget, 1.4).is_none());
+        let uniform = |leaf: &Leaf| vec![1.0 / leaf.moves.len() as f32; leaf.moves.len()];
+        let priors = uniform(&root);
+        search.evaluate(root, 0.0, &priors);
+
+        let first = search.next_leaf(&game, budget, 1.4).unwrap();
+        let second = search.next_leaf(&game, budget, 1.4).unwrap();
+        assert_ne!(first.path, second.path);
+        assert!(search.next_leaf(&game, budget, 1.4).is_none());
+        assert_eq!(search.visits().map(|entry| entry.visits).sum::<u32>(), 0);
+        for leaf in [second, first] {
+            let priors = uniform(&leaf);
+            search.evaluate(leaf, 0.25, &priors);
+        }
+
+        assert!(search.next_leaf(&game, budget, 1.4).is_none());
+        assert_eq!(search.visits().filter(|entry| entry.visits == 1).count(), 2);
+        assert!(search.tree.nodes.iter().all(|node| node.pending == 0));
+        assert_eq!(search.tree.nodes[0].value_sum, -0.5);
     }
 
     #[test]
@@ -230,7 +272,7 @@ mod tests {
         let mut search = Search::new();
         while let Some(leaf) = search.next_leaf(&game, budget, 1.4) {
             let priors = vec![1. / leaf.moves.len() as f32; leaf.moves.len()];
-            search.evaluate(leaf.moves, 0., &priors);
+            search.evaluate(leaf, 0., &priors);
         }
         let visits: Vec<_> = search.visits().collect();
         assert_eq!(

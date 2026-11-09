@@ -104,7 +104,7 @@ impl Hybrid {
             let batch = [(0, leaf)];
             let result = self.evaluate(&batch)?.pop().expect("one prediction");
             let [(_, leaf)] = batch;
-            search.evaluate(leaf.moves, result.value, &result.priors);
+            search.evaluate(leaf, result.value, &result.priors);
         }
         Ok(search.visits().collect())
     }

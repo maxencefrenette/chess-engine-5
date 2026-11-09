@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, io, num::NonZeroU32, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    io,
+    num::{NonZeroU16, NonZeroU32},
+    path::PathBuf,
+};
 
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -64,6 +69,7 @@ pub struct Options {
     pub baseline_dir: PathBuf,
     pub device: String,
     batch: u16,
+    leaves_per_game: NonZeroU16,
     #[serde(rename = "visits_per_move")]
     visits: NonZeroU32,
     max_pairs: u64,
@@ -93,12 +99,13 @@ pub fn run(options: Options, players: [&Hybrid; 2], settings: &Settings) -> io::
     let mut llr = 0.0;
     let mut max_batches = [0; 2];
     println!(
-        "checkpoint match; SPRT [{}, {}] logistic Elo, alpha={} beta={}; batch={} visits={} max_pairs={} seed={}",
+        "checkpoint match; SPRT [{}, {}] logistic Elo, alpha={} beta={}; batch={} leaves_per_game={} visits={} max_pairs={} seed={}",
         options.sprt.lower_elo,
         options.sprt.upper_elo,
         options.sprt.alpha,
         options.sprt.beta,
         options.batch,
+        options.leaves_per_game,
         options.visits,
         options.max_pairs,
         options.seed
@@ -108,12 +115,20 @@ pub fn run(options: Options, players: [&Hybrid; 2], settings: &Settings) -> io::
         let mut pending: [Vec<(usize, Leaf)>; 2] = [Vec::new(), Vec::new()];
         let mut finished = Vec::new();
         for (i, slot) in active.iter_mut().enumerate() {
-            if let Some(leaf) =
-                slot.search
-                    .next_leaf(&slot.game, options.visits, settings.exploration)
+            let batch = &mut pending[slot.player()];
+            let before = batch.len();
+            for _ in 0..options.leaves_per_game.get() {
+                let Some(leaf) =
+                    slot.search
+                        .next_leaf(&slot.game, options.visits, settings.exploration)
+                else {
+                    break;
+                };
+                batch.push((i, leaf));
+            }
+            if batch.len() == before
+                && let Some(outcome) = slot.play(settings)
             {
-                pending[slot.player()].push((i, leaf));
-            } else if let Some(outcome) = slot.play(settings) {
                 let points = match outcome {
                     Outcome::Win(color) if color == slot.candidate_color() => 2,
                     Outcome::Win(_) => 0,
@@ -160,7 +175,7 @@ pub fn run(options: Options, players: [&Hybrid; 2], settings: &Settings) -> io::
             for ((slot, leaf), result) in batch.into_iter().zip(evaluations) {
                 active[slot]
                     .search
-                    .evaluate(leaf.moves, result.value, &result.priors);
+                    .evaluate(leaf, result.value, &result.priors);
             }
         }
         for i in finished.into_iter().rev() {

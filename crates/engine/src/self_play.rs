@@ -98,7 +98,7 @@ fn play_batch(
         for ((i, leaf), result) in pending.into_iter().zip(evaluations) {
             active[i]
                 .search
-                .evaluate(leaf.moves, result.value, &result.priors);
+                .evaluate(leaf, result.value, &result.priors);
         }
         for (i, white_value) in finished.into_iter().rev() {
             let slot = active.swap_remove(i);
