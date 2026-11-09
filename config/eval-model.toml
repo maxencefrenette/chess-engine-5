@@ -1,6 +1,6 @@
 baseline_dir = "/data/chess/chess-engine-5/models/smolgen-v1-1000games-policy-piece-wdl-seed42"
 device = "cuda"
-batch = 8
+batch = 64
 visits_per_move = 800
 # Each pair plays two games with colors swapped.
 max_pairs = 10000
