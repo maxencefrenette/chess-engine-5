@@ -16,6 +16,8 @@ pub struct Config {
     output_dir: PathBuf,
     pub device: String,
     epochs: NonZeroUsize,
+    #[serde(default)]
+    max_steps: usize,
     batch_size: NonZeroUsize,
     learning_rate: f64,
     seed: u64,
@@ -46,6 +48,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         dataset,
         output_dir,
         epochs,
+        max_steps,
         batch_size,
         learning_rate,
         seed,
@@ -95,17 +98,24 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         let epoch_started = Instant::now();
         indices.shuffle(&mut rng);
         let mut totals = [0.; 2];
-        for chunk in indices.chunks(batch_size) {
+        let mut epoch_positions = 0;
+        let remaining = if max_steps == 0 {
+            usize::MAX
+        } else {
+            max_steps - optimizer_steps
+        };
+        for chunk in indices.chunks(batch_size).take(remaining) {
             let batch = Batch::new(&data.train, chunk, device)?;
             let [policy, value] = losses(&net, &playing_value, &batch)?;
             let objective = (&policy + &value)?;
             optimizer.backward_step(&objective)?;
             optimizer_steps += 1;
+            epoch_positions += chunk.len();
             for (total, loss) in totals.iter_mut().zip([policy, value]) {
                 *total += f64::from(loss.to_scalar::<f32>()?) * chunk.len() as f64;
             }
         }
-        let [policy, value] = totals.map(|loss| loss / data.train.len() as f64);
+        let [policy, value] = totals.map(|loss| loss / epoch_positions as f64);
         if !policy.is_finite() || !value.is_finite() {
             return Err("non-finite training loss".into());
         }
@@ -113,6 +123,9 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
             "epoch {epoch}/{epochs}: train policy {policy:.4}, WDL {value:.4}, {:.1}s",
             epoch_started.elapsed().as_secs_f64()
         );
+        if optimizer_steps == max_steps {
+            break;
+        }
     }
     device.synchronize()?;
     let evaluation_started = Instant::now();
@@ -171,6 +184,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
                 "batch_size": batch_size,
                 "learning_rate": learning_rate,
                 "optimizer_steps": optimizer_steps,
+                "max_steps": max_steps,
                 "setup_seconds": setup_seconds,
                 "training_seconds": training_seconds,
                 "evaluation_seconds": evaluation_seconds,

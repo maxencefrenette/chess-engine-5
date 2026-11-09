@@ -2,6 +2,8 @@ output_dir = "/data/chess/chess-engine-5/models/smolgen-experiment"
 device = "cuda"
 dataset = "/data/chess/chess-engine-5/training-data/v1/1794179515052280911-75339/part-00000.parquet"
 epochs = 5
+# Zero runs all configured epochs.
+max_steps = 0
 batch_size = 128
 learning_rate = 0.001
 seed = 42
@@ -15,3 +17,4 @@ smolgen_compression = 2
 smolgen_hidden = 64
 smolgen_head_width = 8
 policy_width = 32
+disable_smolgen = false

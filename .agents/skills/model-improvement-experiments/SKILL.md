@@ -40,6 +40,8 @@ After finishing an experiment, regardless of if it's successful or not, write an
 An experiment report must include the following:
 * The 1-sentence goal of the experiment
 * [optional] svg charts, embedded in the README.md
+
+If a baseline match was run, include:
 * The candidate's wins, draws, and losses (W/D/L)
 * Observed Elo as reported by `eval-model`
 * The SPRT verdict (passed, failed, or inconclusive)

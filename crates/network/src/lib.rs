@@ -20,6 +20,8 @@ pub struct ModelConfig {
     pub smolgen_hidden: usize,
     pub smolgen_head_width: usize,
     pub policy_width: usize,
+    #[serde(default)]
+    pub disable_smolgen: bool,
 }
 
 impl Default for ModelConfig {
@@ -34,6 +36,7 @@ impl Default for ModelConfig {
             smolgen_hidden: 64,
             smolgen_head_width: 8,
             policy_width: 32,
+            disable_smolgen: false,
         }
     }
 }
@@ -123,7 +126,7 @@ struct Block {
     expand: Linear,
     contract: Linear,
     ffn_norm: LayerNorm,
-    smolgen: Smolgen,
+    smolgen: Option<Smolgen>,
 }
 
 impl Block {
@@ -135,11 +138,18 @@ impl Block {
             expand: linear(config.width, config.ffn_width, vb.pp("expand"))?,
             contract: linear(config.ffn_width, config.width, vb.pp("contract"))?,
             ffn_norm: layer_norm(config.width, 1e-5, vb.pp("ffn_norm"))?,
-            smolgen: Smolgen::new(vb.pp("smolgen"), config)?,
+            smolgen: (!config.disable_smolgen)
+                .then(|| Smolgen::new(vb.pp("smolgen"), config))
+                .transpose()?,
         })
     }
 
-    fn forward(&self, x: &Tensor, projection: &Linear, config: ModelConfig) -> Result<Tensor> {
+    fn forward(
+        &self,
+        x: &Tensor,
+        projection: Option<&Linear>,
+        config: ModelConfig,
+    ) -> Result<Tensor> {
         let batch = x.dim(0)?;
         let qkv = self.qkv.forward(x)?;
         let heads = |part| -> Result<Tensor> {
@@ -152,8 +162,11 @@ impl Block {
         let scores = q
             .matmul(&k.transpose(2, 3)?)?
             .affine(((config.width / config.heads) as f64).sqrt().recip(), 0.)?;
-        let bias = self.smolgen.forward(x, projection, config)?;
-        let scores = (&scores + &bias)?;
+        let scores = if let Some(smolgen) = &self.smolgen {
+            (&scores + &smolgen.forward(x, projection.expect("Smolgen projection"), config)?)?
+        } else {
+            scores
+        };
         let probs = if scores.track_op() {
             softmax(&scores, 3)?
         } else {
@@ -180,7 +193,7 @@ pub struct Net {
     input: Linear,
     square: Tensor,
     layers: Vec<Block>,
-    smolgen_projection: Linear,
+    smolgen_projection: Option<Linear>,
     policy_query: Linear,
     policy_key: Linear,
     promotion: Linear,
@@ -203,11 +216,15 @@ impl Net {
             layers: (0..config.layers)
                 .map(|i| Block::new(vb.pp("blocks").pp(i), config))
                 .collect::<Result<_>>()?,
-            smolgen_projection: linear_no_bias(
-                config.smolgen_head_width,
-                SQUARES * SQUARES,
-                vb.pp("smolgen_projection"),
-            )?,
+            smolgen_projection: (!config.disable_smolgen)
+                .then(|| {
+                    linear_no_bias(
+                        config.smolgen_head_width,
+                        SQUARES * SQUARES,
+                        vb.pp("smolgen_projection"),
+                    )
+                })
+                .transpose()?,
             policy_query: linear(config.width, config.policy_width, vb.pp("policy_query"))?,
             policy_key: linear(config.width, config.policy_width, vb.pp("policy_key"))?,
             promotion: linear_no_bias(config.policy_width, 4, vb.pp("promotion"))?,
@@ -232,7 +249,7 @@ impl Net {
     fn encode(&self, position: &Tensor) -> Result<Tensor> {
         let mut x = self.input.forward(position)?.broadcast_add(&self.square)?;
         for layer in &self.layers {
-            x = layer.forward(&x, &self.smolgen_projection, self.config)?;
+            x = layer.forward(&x, self.smolgen_projection.as_ref(), self.config)?;
         }
         Ok(x)
     }
