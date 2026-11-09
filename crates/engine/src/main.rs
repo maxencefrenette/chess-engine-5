@@ -5,6 +5,7 @@ use chess_engine::{
     hybrid::Hybrid,
     matches::{self, Options},
     self_play,
+    settings::Settings,
 };
 
 const USAGE: &str = "usage: chess-engine [--cuda] <command>
@@ -26,6 +27,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .filter(|arg| !arg.starts_with("--"))
             .ok_or(USAGE)?;
         let options: Options = chess_config::load("config/eval-model.toml", args)?;
+        let settings = Settings::load()?;
         let baseline = Hybrid::load(&options.baseline_dir, &options.device)?;
         let candidate = Hybrid::load(Path::new(&candidate_dir), &options.device)?;
         println!(
@@ -34,7 +36,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             candidate_dir,
             options.device
         );
-        return Ok(matches::run(options, [&baseline, &candidate])?);
+        return Ok(matches::run(options, [&baseline, &candidate], &settings)?);
     }
     let model = args.next().ok_or(USAGE)?;
 
@@ -48,7 +50,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Err(USAGE.into());
             }
             let model = Hybrid::load(Path::new(&model), device)?;
-            let run = self_play::generate(Path::new(&output), games, seed, batch, &model)?;
+            let settings = Settings::load()?;
+            let run =
+                self_play::generate(Path::new(&output), games, seed, batch, &model, &settings)?;
             println!("{}", run.display());
         }
         "search" => {
@@ -69,7 +73,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             let model = Hybrid::load(Path::new(&model), device)?;
-            let mut moves = model.search(&game, visits)?;
+            let mut moves = model.search(&game, visits, Settings::load()?.exploration)?;
             moves.sort_by_key(|entry| std::cmp::Reverse(entry.visits));
             for entry in moves {
                 println!("{} {}", entry.mv, entry.visits);

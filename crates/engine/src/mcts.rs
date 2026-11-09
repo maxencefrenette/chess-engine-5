@@ -2,7 +2,7 @@ use std::{num::NonZeroU32, ops::Range};
 
 use crate::chess::{Game, Move, Outcome};
 
-const EXPLORATION: f32 = 1.4;
+use rand::Rng;
 
 #[derive(Clone, Copy, Debug)]
 pub struct MoveVisits {
@@ -45,22 +45,22 @@ impl Tree {
         self.nodes[index].state = NodeState::Branch(children);
     }
 
-    fn select(&self, parent: usize, children: Range<usize>) -> usize {
-        let exploration = (self.nodes[parent].visits.max(1) as f32).sqrt();
+    fn select(&self, parent: usize, children: Range<usize>, exploration: f32) -> usize {
+        let parent_scale = (self.nodes[parent].visits.max(1) as f32).sqrt();
         children
             .max_by(|&left, &right| {
-                self.score(left, exploration)
-                    .total_cmp(&self.score(right, exploration))
+                self.score(left, exploration, parent_scale)
+                    .total_cmp(&self.score(right, exploration, parent_scale))
                     .then_with(|| right.cmp(&left))
             })
             .unwrap()
     }
 
-    fn score(&self, child: usize, exploration: f32) -> f32 {
+    fn score(&self, child: usize, exploration: f32, parent_scale: f32) -> f32 {
         let node = &self.nodes[child];
         // Child values are from the opponent's perspective.
         let value = -node.value_sum / node.visits.max(1) as f32;
-        value + EXPLORATION * node.prior * exploration / (1.0 + node.visits as f32)
+        value + exploration * node.prior * parent_scale / (1.0 + node.visits as f32)
     }
 }
 
@@ -86,7 +86,7 @@ impl Search {
     }
 
     /// Advance through terminal simulations until there is an evaluation to do.
-    pub fn next_leaf(&mut self, game: &Game, budget: NonZeroU32) -> Option<Leaf> {
+    pub fn next_leaf(&mut self, game: &Game, budget: NonZeroU32, exploration: f32) -> Option<Leaf> {
         while self.tree.nodes[0].visits < budget.get() {
             self.path.clear();
             let mut position = game.clone();
@@ -95,7 +95,7 @@ impl Search {
                 self.path.push(index);
                 match &self.tree.nodes[index].state {
                     NodeState::Branch(children) => {
-                        index = self.tree.select(index, children.clone());
+                        index = self.tree.select(index, children.clone(), exploration);
                         position.play_legal(self.tree.moves[index - 1]);
                     }
                     NodeState::Terminal(value) => break *value,
@@ -138,7 +138,48 @@ impl Search {
         }
     }
 
-    pub fn visits(&self) -> impl Iterator<Item = MoveVisits> + '_ {
+    pub fn choose_move(&self, temperature: f64, rng: &mut impl Rng) -> Move {
+        if temperature == 1.0 {
+            let mut ticket = rng.random_range(0..self.tree.nodes[0].visits);
+            for entry in self.visits() {
+                if ticket < entry.visits {
+                    return entry.mv;
+                }
+                ticket -= entry.visits;
+            }
+            unreachable!("root visits sum to the search budget");
+        }
+
+        // Reverse the iteration so ties select the first legal move.
+        let best = self
+            .visits()
+            .rev()
+            .max_by_key(|entry| entry.visits)
+            .unwrap();
+        if temperature == 0.0 {
+            return best.mv;
+        }
+
+        // Scaling by the maximum keeps at least one weight at 1, even at low temperatures.
+        let weight = |visits| {
+            if visits == best.visits {
+                1.0
+            } else {
+                (f64::from(visits) / f64::from(best.visits)).powf(temperature.recip())
+            }
+        };
+        let total: f64 = self.visits().map(|entry| weight(entry.visits)).sum();
+        let mut ticket = rng.random_range(0.0..total);
+        for entry in self.visits() {
+            ticket -= weight(entry.visits);
+            if ticket < 0.0 {
+                return entry.mv;
+            }
+        }
+        best.mv
+    }
+
+    pub fn visits(&self) -> impl DoubleEndedIterator<Item = MoveVisits> + '_ {
         let NodeState::Branch(children) = &self.tree.nodes[0].state else {
             unreachable!("root must be expanded");
         };
@@ -158,15 +199,15 @@ mod tests {
         let game = Game::default();
         let budget = NonZeroU32::new(1).unwrap();
         let mut search = Search::new();
-        let root = search.next_leaf(&game, budget).unwrap();
+        let root = search.next_leaf(&game, budget, 1.4).unwrap();
         let mut priors = vec![0.; root.moves.len()];
         *priors.last_mut().unwrap() = 1.;
         let expected = *root.moves.last().unwrap();
         search.evaluate(root.moves, 0., &priors);
-        let child = search.next_leaf(&game, budget).unwrap();
+        let child = search.next_leaf(&game, budget, 1.4).unwrap();
         let priors = vec![1. / child.moves.len() as f32; child.moves.len()];
         search.evaluate(child.moves, 0., &priors);
-        assert!(search.next_leaf(&game, budget).is_none());
+        assert!(search.next_leaf(&game, budget, 1.4).is_none());
         let visited: Vec<_> = search.visits().filter(|entry| entry.visits != 0).collect();
         assert_eq!(visited.len(), 1);
         assert_eq!(visited[0].mv, expected);
@@ -187,7 +228,7 @@ mod tests {
 
         let budget = NonZeroU32::new(128).unwrap();
         let mut search = Search::new();
-        while let Some(leaf) = search.next_leaf(&game, budget) {
+        while let Some(leaf) = search.next_leaf(&game, budget, 1.4) {
             let priors = vec![1. / leaf.moves.len() as f32; leaf.moves.len()];
             search.evaluate(leaf.moves, 0., &priors);
         }

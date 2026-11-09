@@ -117,12 +117,17 @@ impl Hybrid {
         normalize(&mut logits);
         logits[2] - logits[0]
     }
-    pub fn search(&self, game: &Game, visits: std::num::NonZeroU32) -> io::Result<Vec<MoveVisits>> {
+    pub fn search(
+        &self,
+        game: &Game,
+        visits: std::num::NonZeroU32,
+        exploration: f32,
+    ) -> io::Result<Vec<MoveVisits>> {
         if game.outcome().is_some() {
             return Ok(Vec::new());
         }
         let mut search = Search::new();
-        while let Some(leaf) = search.next_leaf(game, visits) {
+        while let Some(leaf) = search.next_leaf(game, visits, exploration) {
             let batch = [(0, leaf)];
             let result = self.evaluate(&batch)?.pop().expect("one prediction");
             let [(_, leaf)] = batch;

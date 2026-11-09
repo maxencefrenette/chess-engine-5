@@ -1,12 +1,13 @@
 use std::{collections::BTreeMap, io, num::NonZeroU32, path::PathBuf};
 
-use rand::{Rng, SeedableRng};
+use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
 use crate::{
     chess::{Color, Game, Outcome},
     hybrid::Hybrid,
     mcts::{Leaf, Search},
+    settings::Settings,
     sprt,
 };
 
@@ -43,28 +44,14 @@ impl ActiveGame {
         usize::from(self.game.turn() == self.candidate_color())
     }
 
-    fn play(&mut self, visits: NonZeroU32) -> Option<Outcome> {
-        let choice = if self.ply < 4 {
-            let ticket = self.rng.random_range(0..visits.get());
-            let mut cumulative = 0;
-            self.search.visits().find(|entry| {
-                cumulative += entry.visits;
-                cumulative > ticket
-            })
+    fn play(&mut self, settings: &Settings) -> Option<Outcome> {
+        let temperature = if self.ply < settings.eval_sampling_plies {
+            settings.eval_temperature
         } else {
-            // Keep the first legal move on equal visit counts.
-            self.search
-                .visits()
-                .fold(None, |best: Option<crate::mcts::MoveVisits>, entry| {
-                    if best.is_none_or(|best| entry.visits > best.visits) {
-                        Some(entry)
-                    } else {
-                        best
-                    }
-                })
+            0.0
         };
         self.game
-            .play_legal(choice.expect("completed search has a move").mv);
+            .play_legal(self.search.choose_move(temperature, &mut self.rng));
         self.ply += 1;
         self.search = Search::new();
         self.game.outcome()
@@ -84,7 +71,7 @@ pub struct Options {
     sprt: sprt::Config,
 }
 
-pub fn run(options: Options, players: [&Hybrid; 2]) -> io::Result<()> {
+pub fn run(options: Options, players: [&Hybrid; 2], settings: &Settings) -> io::Result<()> {
     if options.batch == 0 || options.max_pairs == 0 || options.max_pairs > u64::MAX / 2 {
         return Err(io::Error::other(
             "batch must be positive and max pairs must be positive and fit twice in u64",
@@ -121,9 +108,12 @@ pub fn run(options: Options, players: [&Hybrid; 2]) -> io::Result<()> {
         let mut pending: [Vec<(usize, Leaf)>; 2] = [Vec::new(), Vec::new()];
         let mut finished = Vec::new();
         for (i, slot) in active.iter_mut().enumerate() {
-            if let Some(leaf) = slot.search.next_leaf(&slot.game, options.visits) {
+            if let Some(leaf) =
+                slot.search
+                    .next_leaf(&slot.game, options.visits, settings.exploration)
+            {
                 pending[slot.player()].push((i, leaf));
-            } else if let Some(outcome) = slot.play(options.visits) {
+            } else if let Some(outcome) = slot.play(settings) {
                 let points = match outcome {
                     Outcome::Win(color) if color == slot.candidate_color() => 2,
                     Outcome::Win(_) => 0,
