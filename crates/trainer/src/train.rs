@@ -18,9 +18,19 @@ pub struct Config {
     epochs: NonZeroUsize,
     max_steps: usize,
     batch_size: NonZeroUsize,
-    learning_rate: f64,
+    adamw: AdamWConfig,
     seed: u64,
     model: ModelConfig,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct AdamWConfig {
+    learning_rate: f64,
+    beta1: f64,
+    beta2: f64,
+    eps: f64,
+    weight_decay: f64,
 }
 
 fn losses(
@@ -49,14 +59,14 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         epochs,
         max_steps,
         batch_size,
-        learning_rate,
+        adamw,
         seed,
         model,
         ..
     } = config;
     let (epochs, batch_size) = (epochs.get(), batch_size.get());
-    if !learning_rate.is_finite() || learning_rate <= 0. {
-        return Err("training learning_rate must be positive and finite".into());
+    if !adamw.learning_rate.is_finite() || adamw.learning_rate <= 0. {
+        return Err("training adamw.learning_rate must be positive and finite".into());
     }
     if output_dir.exists() {
         return Err(format!("output already exists: {}", output_dir.display()).into());
@@ -83,8 +93,11 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     let mut optimizer = AdamW::new(
         parameters.all_vars(),
         ParamsAdamW {
-            lr: learning_rate,
-            ..Default::default()
+            lr: adamw.learning_rate,
+            beta1: adamw.beta1,
+            beta2: adamw.beta2,
+            eps: adamw.eps,
+            weight_decay: adamw.weight_decay,
         },
     )?;
     let mut indices: Vec<_> = (0..data.train.len()).collect();
@@ -181,7 +194,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
                 "seed": seed,
                 "epochs": epochs,
                 "batch_size": batch_size,
-                "learning_rate": learning_rate,
+                "adamw": adamw,
                 "optimizer_steps": optimizer_steps,
                 "max_steps": max_steps,
                 "setup_seconds": setup_seconds,
