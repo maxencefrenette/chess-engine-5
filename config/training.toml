@@ -19,8 +19,10 @@ width = 64
 heads = 4
 layers = 2
 ffn_width = 128
-smolgen_compression = 2
-smolgen_hidden = 64
-smolgen_head_width = 8
 policy_width = 32
-disable_smolgen = false
+
+[model.smolgen]
+mode = "enabled"
+compression = 2
+hidden = 64
+head_width = 8

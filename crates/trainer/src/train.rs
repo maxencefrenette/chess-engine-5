@@ -236,7 +236,6 @@ mod tests {
             "/../../config/training.toml"
         ))?;
         config.model.layers = 1;
-        config.model.disable_smolgen = false;
         let device = &Device::Cpu;
         let params = VarMap::new();
         let net = Net::new(

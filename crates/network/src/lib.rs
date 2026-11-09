@@ -16,11 +16,19 @@ pub struct ModelConfig {
     pub heads: usize,
     pub layers: usize,
     pub ffn_width: usize,
-    pub smolgen_compression: usize,
-    pub smolgen_hidden: usize,
-    pub smolgen_head_width: usize,
     pub policy_width: usize,
-    pub disable_smolgen: bool,
+    pub smolgen: SmolgenConfig,
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SmolgenConfig {
+    Enabled {
+        compression: usize,
+        hidden: usize,
+        head_width: usize,
+    },
+    Disabled {},
 }
 
 impl ModelConfig {
@@ -30,9 +38,6 @@ impl ModelConfig {
             self.heads,
             self.layers,
             self.ffn_width,
-            self.smolgen_compression,
-            self.smolgen_hidden,
-            self.smolgen_head_width,
             self.policy_width,
         ]
         .contains(&0)
@@ -41,6 +46,15 @@ impl ModelConfig {
             candle_core::bail!(
                 "model dimensions must be positive and width must be divisible by heads"
             );
+        }
+        if let SmolgenConfig::Enabled {
+            compression,
+            hidden,
+            head_width,
+        } = self.smolgen
+            && [compression, hidden, head_width].contains(&0)
+        {
+            candle_core::bail!("Smolgen dimensions must be positive");
         }
         Ok(())
     }
@@ -60,6 +74,7 @@ fn normalize(norm: &LayerNorm, x: &Tensor) -> Result<Tensor> {
 }
 
 struct Smolgen {
+    head_width: usize,
     compress: Linear,
     mix: Linear,
     mix_norm: LayerNorm,
@@ -68,25 +83,21 @@ struct Smolgen {
 }
 
 impl Smolgen {
-    fn new(vb: VarBuilder, config: ModelConfig) -> Result<Self> {
+    fn new(
+        vb: VarBuilder,
+        config: ModelConfig,
+        compression: usize,
+        hidden: usize,
+        head_width: usize,
+    ) -> Result<Self> {
+        let heads_width = config.heads * head_width;
         Ok(Self {
-            compress: linear_no_bias(config.width, config.smolgen_compression, vb.pp("compress"))?,
-            mix: linear(
-                SQUARES * config.smolgen_compression,
-                config.smolgen_hidden,
-                vb.pp("mix"),
-            )?,
-            mix_norm: layer_norm(config.smolgen_hidden, 1e-5, vb.pp("mix_norm"))?,
-            heads: linear(
-                config.smolgen_hidden,
-                config.heads * config.smolgen_head_width,
-                vb.pp("heads"),
-            )?,
-            head_norm: layer_norm(
-                config.heads * config.smolgen_head_width,
-                1e-5,
-                vb.pp("head_norm"),
-            )?,
+            head_width,
+            compress: linear_no_bias(config.width, compression, vb.pp("compress"))?,
+            mix: linear(SQUARES * compression, hidden, vb.pp("mix"))?,
+            mix_norm: layer_norm(hidden, 1e-5, vb.pp("mix_norm"))?,
+            heads: linear(hidden, heads_width, vb.pp("heads"))?,
+            head_norm: layer_norm(heads_width, 1e-5, vb.pp("head_norm"))?,
         })
     }
 
@@ -96,7 +107,7 @@ impl Smolgen {
         let mixed = normalize(&self.mix_norm, &self.mix.forward(&compressed)?.silu()?)?;
         let heads = normalize(&self.head_norm, &self.heads.forward(&mixed)?.silu()?)?;
         projection
-            .forward(&heads.reshape((batch, config.heads, config.smolgen_head_width))?)?
+            .forward(&heads.reshape((batch, config.heads, self.head_width))?)?
             .reshape((batch, config.heads, SQUARES, SQUARES))
     }
 }
@@ -120,9 +131,20 @@ impl Block {
             expand: linear(config.width, config.ffn_width, vb.pp("expand"))?,
             contract: linear(config.ffn_width, config.width, vb.pp("contract"))?,
             ffn_norm: layer_norm(config.width, 1e-5, vb.pp("ffn_norm"))?,
-            smolgen: (!config.disable_smolgen)
-                .then(|| Smolgen::new(vb.pp("smolgen"), config))
-                .transpose()?,
+            smolgen: match config.smolgen {
+                SmolgenConfig::Enabled {
+                    compression,
+                    hidden,
+                    head_width,
+                } => Some(Smolgen::new(
+                    vb.pp("smolgen"),
+                    config,
+                    compression,
+                    hidden,
+                    head_width,
+                )?),
+                SmolgenConfig::Disabled {} => None,
+            },
         })
     }
 
@@ -198,15 +220,14 @@ impl Net {
             layers: (0..config.layers)
                 .map(|i| Block::new(vb.pp("blocks").pp(i), config))
                 .collect::<Result<_>>()?,
-            smolgen_projection: (!config.disable_smolgen)
-                .then(|| {
-                    linear_no_bias(
-                        config.smolgen_head_width,
-                        SQUARES * SQUARES,
-                        vb.pp("smolgen_projection"),
-                    )
-                })
-                .transpose()?,
+            smolgen_projection: match config.smolgen {
+                SmolgenConfig::Enabled { head_width, .. } => Some(linear_no_bias(
+                    head_width,
+                    SQUARES * SQUARES,
+                    vb.pp("smolgen_projection"),
+                )?),
+                SmolgenConfig::Disabled {} => None,
+            },
             policy_query: linear(config.width, config.policy_width, vb.pp("policy_query"))?,
             policy_key: linear(config.width, config.policy_width, vb.pp("policy_key"))?,
             promotion: linear_no_bias(config.policy_width, 4, vb.pp("promotion"))?,
