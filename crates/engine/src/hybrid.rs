@@ -4,6 +4,7 @@ use std::{
 };
 
 use candle_core::{Device, Tensor};
+use chess_config::DeviceConfig;
 use chess_network::{
     INPUTS, Net, SQUARES, checkpoint::Checkpoint, encode_position, move_indices,
     piece_value::CpuPieceValue,
@@ -27,13 +28,8 @@ pub struct Hybrid {
 }
 
 impl Hybrid {
-    pub fn load(model_dir: &Path, device: &str) -> io::Result<Self> {
-        let device = match device {
-            "cpu" => Device::Cpu,
-            "cuda" if cfg!(feature = "cuda") => Device::new_cuda(0).map_err(io::Error::other)?,
-            "cuda" => return Err(io::Error::other("build chess-engine with --features cuda")),
-            _ => return Err(io::Error::other("device must be cpu or cuda")),
-        };
+    pub fn load(model_dir: &Path, device: DeviceConfig) -> io::Result<Self> {
+        let device = device.try_into().map_err(io::Error::other)?;
         let checkpoint = Checkpoint::load(model_dir, &device)?;
         let value = checkpoint.value().map_err(io::Error::other)?;
         let policy = checkpoint.into_policy(&device).map_err(io::Error::other)?;

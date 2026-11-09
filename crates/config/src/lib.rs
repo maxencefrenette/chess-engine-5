@@ -47,3 +47,42 @@ pub trait TomlConfig: DeserializeOwned {
             .map_err(|error| format!("{path}: {error}").into())
     }
 }
+
+#[derive(Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DeviceConfig {
+    Cpu,
+    Cuda,
+}
+
+impl TryFrom<DeviceConfig> for candle_core::Device {
+    type Error = candle_core::Error;
+
+    fn try_from(config: DeviceConfig) -> Result<Self, Self::Error> {
+        match config {
+            DeviceConfig::Cpu => Ok(Self::Cpu),
+            DeviceConfig::Cuda => Self::new_cuda(0),
+        }
+    }
+}
+
+impl std::fmt::Display for DeviceConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Cpu => "cpu",
+            Self::Cuda => "cuda",
+        })
+    }
+}
+
+impl std::str::FromStr for DeviceConfig {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "cpu" => Ok(Self::Cpu),
+            "cuda" => Ok(Self::Cuda),
+            _ => Err("device must be cpu or cuda"),
+        }
+    }
+}

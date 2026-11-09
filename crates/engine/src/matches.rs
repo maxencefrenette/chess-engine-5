@@ -79,7 +79,7 @@ struct SprtPresets {
 #[chess_config::toml_config]
 pub struct Options {
     pub baseline_dir: PathBuf,
-    pub device: String,
+    pub device: chess_config::DeviceConfig,
     batch: u16,
     leaves_per_game: NonZeroU16,
     baseline_visits_per_move: NonZeroU32,
@@ -288,7 +288,7 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../config/eval-model.toml"
         ))?;
-        Hybrid::load(&options.baseline_dir, "cpu").map_err(|error| {
+        Hybrid::load(&options.baseline_dir, chess_config::DeviceConfig::Cpu).map_err(|error| {
             format!(
                 "loading baseline {}: {error}",
                 options.baseline_dir.display()

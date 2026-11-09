@@ -20,7 +20,7 @@ use crate::{
 #[chess_config::toml_config]
 pub struct Config {
     pub model: PathBuf,
-    pub device: String,
+    pub device: chess_config::DeviceConfig,
     output_dir: PathBuf,
     total_games: NonZeroUsize,
     games_per_shard: NonZeroUsize,

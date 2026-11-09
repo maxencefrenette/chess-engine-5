@@ -2,7 +2,7 @@ use std::{env, error::Error, process::ExitCode};
 
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{Optimizer, SGD, VarBuilder, VarMap};
-use chess_config::TomlConfig;
+use chess_config::{DeviceConfig, TomlConfig};
 
 mod data;
 mod train;
@@ -15,31 +15,22 @@ fn run() -> Result<(), Box<dyn Error>> {
     let command = args.next();
     match command.as_deref() {
         Some("check-device") => {
-            let backend = args.next().unwrap_or_else(|| "cpu".into());
+            let backend = args.next().as_deref().unwrap_or("cpu").parse()?;
             if args.next().is_some() {
                 return Err(USAGE.into());
             }
-            check_device(&backend, &device(&backend)?)
+            check_device(backend, &backend.try_into()?)
         }
         Some("train") => {
             let config = train::Config::load("config/training.toml", args)?;
-            let device = device(&config.device)?;
+            let device = config.device.try_into()?;
             train::run(config, &device)
         }
         _ => Err(USAGE.into()),
     }
 }
 
-fn device(backend: &str) -> Result<Device, Box<dyn Error>> {
-    match backend {
-        "cpu" => Ok(Device::Cpu),
-        "cuda" if cfg!(feature = "cuda") => Ok(Device::new_cuda(0)?),
-        "cuda" => Err("CUDA requires building chess-trainer with --features cuda".into()),
-        _ => Err(USAGE.into()),
-    }
-}
-
-fn check_device(backend: &str, device: &Device) -> Result<(), Box<dyn Error>> {
+fn check_device(backend: DeviceConfig, device: &Device) -> Result<(), Box<dyn Error>> {
     // Verify a gradient and parameter update on the selected device.
     let parameters = VarMap::new();
     let builder = VarBuilder::from_varmap(&parameters, DType::F32, device);

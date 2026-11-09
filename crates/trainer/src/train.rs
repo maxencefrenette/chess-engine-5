@@ -13,7 +13,7 @@ use crate::data::{self, Batch, Result};
 pub struct Config {
     dataset: PathBuf,
     output_dir: PathBuf,
-    pub device: String,
+    pub device: chess_config::DeviceConfig,
     epochs: NonZeroUsize,
     max_steps: usize,
     batch_size: NonZeroUsize,
