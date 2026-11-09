@@ -1,8 +1,11 @@
-use std::{fs, path::Path, time::Instant};
+use std::{path::Path, time::Instant};
 
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap, loss, ops::log_softmax};
-use chess_network::{BLOCKS, HEADS, INPUTS, Net, WIDTH};
+use chess_network::{
+    Net,
+    checkpoint::{self, Checkpoint},
+};
 use rand::{SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha8Rng;
 use serde_json::json;
@@ -29,6 +32,7 @@ fn losses(net: &Net, batch: &Batch) -> candle_core::Result<(Tensor, Tensor)> {
 pub fn run(
     shard: &Path,
     output: &Path,
+    value_from: &Path,
     epochs: usize,
     device: &Device,
     material_hint: bool,
@@ -36,6 +40,7 @@ pub fn run(
     if output.exists() {
         return Err(format!("output already exists: {}", output.display()).into());
     }
+    let playing_value = Checkpoint::load(value_from, &Device::Cpu)?.value()?;
     let started = Instant::now();
     let data = data::load(shard, SEED)?;
     println!(
@@ -86,7 +91,7 @@ pub fn run(
     }
 
     // Load the trained parameters as constants so the test pass does not build a backward graph.
-    let tensors = parameters
+    let tensors: std::collections::HashMap<_, _> = parameters
         .data()
         .lock()
         .unwrap()
@@ -94,7 +99,7 @@ pub fn run(
         .map(|(name, var)| (name.clone(), var.as_tensor().detach()))
         .collect();
     let net = Net::new(
-        VarBuilder::from_tensors(tensors, DType::F32, device),
+        VarBuilder::from_tensors(tensors.clone(), DType::F32, device),
         material_hint,
     )?;
     let mut counts = [1.; 3];
@@ -126,40 +131,30 @@ pub fn run(
         "test policy {policy:.4} vs uniform {uniform:.4}; test WDL {value:.4} vs prior {value_baseline:.4}"
     );
 
-    fs::create_dir(output)?;
-    parameters.save(output.join("weights.safetensors"))?;
-    let manifest = json!({
-        "architecture": "lc0_style_smolgen_v1",
-        "position_encoding": "packed_board_planes_v1",
-        "move_encoding": "ce5_packed_move_v1",
-        "value_order": ["loss", "draw", "win"],
-        "width": WIDTH,
-        "heads": HEADS,
-        "blocks": BLOCKS,
-        "input_channels": INPUTS,
-        "weights": "weights.safetensors",
-        "material_hint": material_hint.then_some("stm_material_squash_8_value_residual_v1"),
-        "training": {
-            "source": shard,
-            "seed": SEED,
-            "epochs": epochs,
-            "batch_size": BATCH_SIZE,
-            "learning_rate": LEARNING_RATE,
-            "device": if device.is_cuda() { "cuda" } else { "cpu" },
-            "dtype": "f32",
-            "layer_norm_backward": true,
-            "train_games": data.train_games,
-            "train_positions": data.train.len(),
-            "test_game_ids": data.test_ids,
-            "test_positions": data.test.len(),
-            "test_policy_loss": policy,
-            "uniform_policy_loss": uniform,
-            "beats_uniform_policy": beats_uniform,
-            "test_wdl_loss": value,
-            "prior_wdl_loss": value_baseline,
-        }
-    });
-    fs::write(output.join("model.json"), format!("{manifest:#}\n"))?;
+    let mut config = checkpoint::config(
+        material_hint,
+        json!({
+                "source": shard,
+                "seed": SEED,
+                "epochs": epochs,
+                "batch_size": BATCH_SIZE,
+                "learning_rate": LEARNING_RATE,
+                "device": if device.is_cuda() { "cuda" } else { "cpu" },
+                "dtype": "f32",
+                "layer_norm_backward": true,
+                "train_games": data.train_games,
+                "train_positions": data.train.len(),
+                "test_game_ids": data.test_ids,
+                "test_positions": data.test.len(),
+                "test_policy_loss": policy,
+                "uniform_policy_loss": uniform,
+                "beats_uniform_policy": beats_uniform,
+                "test_wdl_loss": value,
+                "prior_wdl_loss": value_baseline,
+        }),
+    );
+    config["value_from"] = json!(value_from);
+    checkpoint::save(output, tensors, &playing_value, &config)?;
     println!(
         "saved {} in {:.1}s",
         output.display(),

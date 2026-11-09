@@ -6,7 +6,7 @@ use candle_nn::{Optimizer, SGD, VarBuilder, VarMap};
 mod data;
 mod train;
 
-const USAGE: &str = "usage: chess-trainer check-device [cpu|cuda] | train SHARD OUTPUT_DIR [EPOCHS=5] [cuda|cpu] [--material-hint]";
+const USAGE: &str = "usage: chess-trainer check-device [cpu|cuda] | train SHARD OUTPUT_DIR VALUE_FROM_DIR [EPOCHS=5] [cuda|cpu] [--material-hint]";
 
 fn run() -> Result<(), Box<dyn Error>> {
     let mut args = env::args().skip(1);
@@ -22,6 +22,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some("train") => {
             let shard = args.next().ok_or(USAGE)?;
             let output = args.next().ok_or(USAGE)?;
+            let value_from = args.next().ok_or(USAGE)?;
             let epochs = args
                 .next()
                 .as_deref()
@@ -39,6 +40,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             train::run(
                 Path::new(&shard),
                 Path::new(&output),
+                Path::new(&value_from),
                 epochs.get(),
                 &device(&backend)?,
                 hint.is_some(),

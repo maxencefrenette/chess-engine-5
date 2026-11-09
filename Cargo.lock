@@ -312,7 +312,6 @@ name = "chess-engine"
 version = "0.1.0"
 dependencies = [
  "candle-core",
- "candle-nn",
  "chess-data",
  "chess-network",
  "rand",
@@ -326,6 +325,7 @@ version = "0.1.0"
 dependencies = [
  "candle-core",
  "candle-nn",
+ "serde_json",
 ]
 
 [[package]]

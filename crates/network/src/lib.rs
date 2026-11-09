@@ -1,3 +1,5 @@
+pub mod checkpoint;
+
 use candle_core::{Result, Tensor};
 use candle_nn::{
     Init, LayerNorm, Linear, Module, VarBuilder, layer_norm, linear, linear_no_bias,

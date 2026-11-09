@@ -5,8 +5,8 @@ rust = "1.95.0"
 description = "Run the Rust workspace tests"
 run = "cargo test --workspace --locked"
 
-[tasks.check-cuda]
-description = "Build Candle with CUDA and check a GPU training step"
+[tasks.with-cuda]
+hide = true
 tools = { "conda:cuda-toolkit" = { version = "13.2.2", channel = "conda-forge" } }
 run = """
 set -eu
@@ -14,6 +14,16 @@ CUDA_HOME="$(mise where conda:cuda-toolkit@13.2.2)"
 export CUDA_HOME
 export PATH="$CUDA_HOME/bin:$PATH"
 export LD_LIBRARY_PATH="$CUDA_HOME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-nvcc --version
-cargo run --locked -p chess-trainer --features cuda -- check-device cuda
+exec
 """
+
+[tasks.check-cuda]
+description = "Build Candle with CUDA and check a GPU training step"
+run = [
+  "mise run with-cuda -- nvcc --version",
+  "mise run with-cuda -- cargo run --locked -p chess-trainer --features cuda -- check-device cuda",
+]
+
+[tasks.match]
+description = "Evaluate a candidate checkpoint against a baseline on CUDA"
+run = "mise run with-cuda -- cargo run --release --locked -p chess-engine --features cuda -- --cuda match"

@@ -8,9 +8,9 @@ use chess_engine::{
 };
 
 const USAGE: &str = "usage: chess-engine [--cuda] <command>
-  search MODEL VALUE VISITS [MOVE ...]
-  self-play MODEL VALUE OUTPUT_DIR GAMES SEED [BATCH=16]
-  match BASE_MODEL BASE_VALUE CANDIDATE_MODEL CANDIDATE_VALUE [BATCH=8] [VISITS=800] [MAX_PAIRS=10000] [SEED=42]";
+  search MODEL_DIR VISITS [MOVE ...]
+  self-play MODEL_DIR OUTPUT_DIR GAMES SEED [BATCH=16]
+  match BASELINE_DIR CANDIDATE_DIR [BATCH=8] [VISITS=800] [MAX_PAIRS=10000] [SEED=42]";
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
@@ -24,12 +24,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err(USAGE.into());
     }
     let model = args.next().ok_or(USAGE)?;
-    let value = args.next().ok_or(USAGE)?;
 
     match command.as_str() {
         "match" => {
             let candidate_model = args.next().ok_or(USAGE)?;
-            let candidate_value = args.next().ok_or(USAGE)?;
             let options = Options {
                 batch: args.next().as_deref().unwrap_or("8").parse()?,
                 visits: args.next().as_deref().unwrap_or("800").parse()?,
@@ -39,12 +37,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if args.next().is_some() {
                 return Err(USAGE.into());
             }
-            let baseline = Hybrid::load(Path::new(&model), Path::new(&value), device)?;
-            let candidate = Hybrid::load(
-                Path::new(&candidate_model),
-                Path::new(&candidate_value),
-                device,
-            )?;
+            let baseline = Hybrid::load(Path::new(&model), device)?;
+            let candidate = Hybrid::load(Path::new(&candidate_model), device)?;
             println!("baseline={model} candidate={candidate_model} device={device}");
             matches::run(options, [&baseline, &candidate])?;
         }
@@ -56,7 +50,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if args.next().is_some() {
                 return Err(USAGE.into());
             }
-            let model = Hybrid::load(Path::new(&model), Path::new(&value), device)?;
+            let model = Hybrid::load(Path::new(&model), device)?;
             let run = self_play::generate(Path::new(&output), games, seed, batch, &model)?;
             println!("{}", run.display());
         }
@@ -77,7 +71,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{outcome:?}");
                 return Ok(());
             }
-            let model = Hybrid::load(Path::new(&model), Path::new(&value), device)?;
+            let model = Hybrid::load(Path::new(&model), device)?;
             let mut moves = model.search(&game, visits)?;
             moves.sort_by_key(|entry| std::cmp::Reverse(entry.visits));
             for entry in moves {
