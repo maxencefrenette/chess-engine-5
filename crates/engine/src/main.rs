@@ -1,5 +1,6 @@
 use std::{env, path::Path, process::ExitCode};
 
+use chess_config::TomlConfig;
 use chess_engine::{
     chess::Game,
     hybrid::Hybrid,
@@ -31,7 +32,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .next()
             .filter(|arg| !arg.starts_with("--"))
             .ok_or(USAGE)?;
-        let options: Options = chess_config::load("config/eval-model.toml", args)?;
+        let options = Options::load("config/eval-model.toml", args)?;
         let settings = Settings::load()?;
         let baseline = Hybrid::load(&options.baseline_dir, &options.device)?;
         let candidate = Hybrid::load(Path::new(&candidate_dir), &options.device)?;
@@ -49,7 +50,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         )?);
     }
     if command == "self-play" && device == "cpu" {
-        let config: self_play::Config = chess_config::load("config/datagen.toml", args)?;
+        let config = self_play::Config::load("config/datagen.toml", args)?;
         let model = Hybrid::load(&config.model, &config.device)?;
         let run = self_play::generate(&config, &model, &Settings::load()?)?;
         println!("{}", run.display());

@@ -2,6 +2,7 @@ use std::{env, error::Error, process::ExitCode};
 
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{Optimizer, SGD, VarBuilder, VarMap};
+use chess_config::TomlConfig;
 
 mod data;
 mod train;
@@ -21,7 +22,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             check_device(&backend, &device(&backend)?)
         }
         Some("train") => {
-            let config: train::Config = chess_config::load("config/training.toml", args)?;
+            let config = train::Config::load("config/training.toml", args)?;
             let device = device(&config.device)?;
             train::run(config, &device)
         }

@@ -9,8 +9,7 @@ use serde_json::json;
 
 use crate::data::{self, Batch, Result};
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[chess_config::toml_config]
 pub struct Config {
     dataset: PathBuf,
     output_dir: PathBuf,
@@ -23,8 +22,8 @@ pub struct Config {
     model: ModelConfig,
 }
 
-#[derive(serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
+#[chess_config::toml_config]
+#[derive(serde::Serialize)]
 struct AdamWConfig {
     learning_rate: f64,
     beta1: f64,
@@ -225,16 +224,17 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use chess_config::TomlConfig;
     use chess_network::{INPUTS, SQUARES};
 
     use super::*;
 
     #[test]
     fn policy_loss_reaches_smolgen() -> Result<()> {
-        let mut config: Config = chess_config::load(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/training.toml"),
-            std::iter::empty(),
-        )?;
+        let mut config = Config::from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/training.toml"
+        ))?;
         config.model.layers = 1;
         config.model.disable_smolgen = false;
         let device = &Device::Cpu;

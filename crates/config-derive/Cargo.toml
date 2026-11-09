@@ -1,0 +1,11 @@
+[package]
+name = "chess-config-derive"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote = "1"
+syn = { version = "2", features = ["full"] }

@@ -1,6 +1,5 @@
 // Scores are the candidate's total points per color-swapped pair, in half-points.
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[chess_config::toml_config]
 pub(crate) struct Config {
     pub lower_elo: f64,
     pub upper_elo: f64,

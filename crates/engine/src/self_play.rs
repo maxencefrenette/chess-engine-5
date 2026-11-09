@@ -17,8 +17,7 @@ use crate::{
     settings::Settings,
 };
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[chess_config::toml_config]
 pub struct Config {
     pub model: PathBuf,
     pub device: String,

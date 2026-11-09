@@ -1,30 +1,57 @@
 use std::{error::Error, fs, path::Path, process::ExitCode};
 
-use syn::{ItemStruct, Meta, Token, punctuated::Punctuated, visit::Visit};
+use syn::{Item, ItemStruct, Meta, Token, Type, punctuated::Punctuated};
 
 #[derive(Default)]
 struct SerdeFieldDefaults {
     violations: Vec<(usize, usize, String)>,
 }
 
-impl<'ast> Visit<'ast> for SerdeFieldDefaults {
-    fn visit_item_struct(&mut self, item: &'ast ItemStruct) {
-        let deserializes = item.attrs.iter().any(|attr| {
-            attr.path().is_ident("derive")
-                && attr
-                    .parse_args_with(Punctuated::<syn::Path, Token![,]>::parse_terminated)
-                    .is_ok_and(|paths| {
-                        paths.iter().any(|path| {
-                            path.is_ident("Deserialize")
-                                || (path.segments.len() == 2
-                                    && path.segments[0].ident == "serde"
-                                    && path.segments[1].ident == "Deserialize")
-                        })
-                    })
-        });
-        if !deserializes {
-            return;
+impl SerdeFieldDefaults {
+    fn check_items(&mut self, items: &[Item]) {
+        let mut configs = std::collections::HashSet::new();
+        for item in items {
+            let Item::Impl(item) = item else { continue };
+            let Some((_, trait_path, _)) = &item.trait_ else {
+                continue;
+            };
+            if !is_config_path(trait_path, "TomlConfig") {
+                continue;
+            }
+            if let Type::Path(target) = item.self_ty.as_ref()
+                && let Some(name) = target.path.get_ident()
+                && items
+                    .iter()
+                    .any(|item| matches!(item, Item::Struct(item) if item.ident == *name))
+            {
+                configs.insert(name);
+                continue;
+            }
+            let location = trait_path.segments.last().unwrap().ident.span().start();
+            self.violations.push((
+                location.line,
+                location.column + 1,
+                "toml_config_impl: put the TomlConfig implementation next to its struct".into(),
+            ));
         }
+        for item in items {
+            match item {
+                Item::Struct(item)
+                    if configs.contains(&item.ident) || is_annotated_toml_config(item) =>
+                {
+                    self.check_fields(item);
+                }
+                Item::Mod(item) => {
+                    if let Some((_, items)) = &item.content {
+                        self.check_items(items);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn check_fields(&mut self, item: &ItemStruct) {
         for (index, field) in item.fields.iter().enumerate() {
             for attr in &field.attrs {
                 if !attr.path().is_ident("serde") {
@@ -45,12 +72,36 @@ impl<'ast> Visit<'ast> for SerdeFieldDefaults {
                     self.violations.push((
                         location.line,
                         location.column + 1,
-                        format!("{}.{}", item.ident, name),
+                        format!(
+                            "serde_field_default: {}.{name} must not declare a Serde default\n  = reason: config deserializers target the TOML files checked into this repository. Older config formats require no backward compatibility.\n  = help: remove the Serde default and set the default value in the checked-in TOML file",
+                            item.ident
+                        ),
                     ));
                 }
             }
         }
     }
+}
+
+fn is_config_path(path: &syn::Path, name: &str) -> bool {
+    path.is_ident(name)
+        || (path.segments.len() == 2
+            && path.segments[0].ident == "chess_config"
+            && path.segments[1].ident == name)
+}
+
+fn is_annotated_toml_config(item: &ItemStruct) -> bool {
+    item.attrs.iter().any(|attr| {
+        is_config_path(attr.path(), "toml_config")
+            || (attr.path().is_ident("derive")
+                && attr
+                    .parse_args_with(Punctuated::<syn::Path, Token![,]>::parse_terminated)
+                    .is_ok_and(|derives| {
+                        derives
+                            .iter()
+                            .any(|path| is_config_path(path, "TomlConfig"))
+                    }))
+    })
 }
 
 fn check_tree(directory: &Path) -> Result<bool, Box<dyn Error>> {
@@ -68,12 +119,9 @@ fn check_tree(directory: &Path) -> Result<bool, Box<dyn Error>> {
             let file =
                 syn::parse_file(&source).map_err(|error| format!("{}: {error}", path.display()))?;
             let mut lint = SerdeFieldDefaults::default();
-            lint.visit_file(&file);
-            for (line, column, field) in lint.violations {
-                eprintln!(
-                    "{}:{line}:{column}: serde_field_default: {field} must not declare a Serde default\n  = reason: config deserializers target the TOML files checked into this repository. Older config formats require no backward compatibility.\n  = help: remove the Serde default and set the default value in the checked-in TOML file",
-                    path.display()
-                );
+            lint.check_items(&file.items);
+            for (line, column, message) in lint.violations {
+                eprintln!("{}:{line}:{column}: {message}", path.display());
                 clean = false;
             }
         }
@@ -97,14 +145,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detects_explicit_field_defaults_on_deserialized_structs() {
+    fn detects_defaults_only_on_toml_config_structs() {
         let file = syn::parse_file(
             r#"
-            #[derive(Serialize)]
+            #[derive(serde::Deserialize)]
             struct Output { #[serde(default)] x: u32 }
 
             mod nested {
-                #[derive(serde::Deserialize)]
+                #[chess_config::toml_config]
                 #[serde(default)]
                 struct Settings {
                     #[serde(rename = "x", default)]
@@ -114,15 +162,32 @@ mod tests {
 
                 #[derive(Deserialize)]
                 struct Tuple(#[serde(default = "fallback")] u32);
+                impl TomlConfig for Tuple {}
             }
         "#,
         )
         .unwrap();
         let mut lint = SerdeFieldDefaults::default();
-        lint.visit_file(&file);
+        lint.check_items(&file.items);
+        let hits: Vec<_> = lint
+            .violations
+            .iter()
+            .map(|(line, column, message)| (*line, *column, message.lines().next().unwrap()))
+            .collect();
         assert_eq!(
-            lint.violations,
-            [(9, 43, "Settings.named".into()), (15, 38, "Tuple.0".into())]
+            hits,
+            [
+                (
+                    9,
+                    43,
+                    "serde_field_default: Settings.named must not declare a Serde default"
+                ),
+                (
+                    15,
+                    38,
+                    "serde_field_default: Tuple.0 must not declare a Serde default"
+                ),
+            ]
         );
     }
 }

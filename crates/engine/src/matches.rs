@@ -69,16 +69,14 @@ pub enum Mode {
     NonRegression,
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[chess_config::toml_config]
 struct SprtPresets {
     gainer: sprt::Config,
     #[serde(rename = "non-regression")]
     non_regression: sprt::Config,
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[chess_config::toml_config]
 pub struct Options {
     pub baseline_dir: PathBuf,
     pub device: String,
@@ -282,13 +280,14 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chess_config::TomlConfig;
 
     #[test]
     fn configured_baseline_checkpoint_loads_on_cpu() -> Result<(), Box<dyn std::error::Error>> {
-        let options: Options = chess_config::load(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/eval-model.toml"),
-            std::iter::empty(),
-        )?;
+        let options = Options::from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/eval-model.toml"
+        ))?;
         Hybrid::load(&options.baseline_dir, "cpu").map_err(|error| {
             format!(
                 "loading baseline {}: {error}",

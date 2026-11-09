@@ -9,8 +9,8 @@ use candle_nn::{
 
 pub const SQUARES: usize = 64;
 pub const INPUTS: usize = 21;
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[chess_config::toml_config]
+#[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct ModelConfig {
     pub width: usize,
     pub heads: usize,

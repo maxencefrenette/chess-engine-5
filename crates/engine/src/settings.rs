@@ -1,7 +1,8 @@
-use std::{error::Error, iter};
+use std::error::Error;
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+use chess_config::TomlConfig;
+
+#[chess_config::toml_config]
 pub struct Settings {
     pub exploration: f32,
     pub eval_temperature: f64,
@@ -10,7 +11,7 @@ pub struct Settings {
 
 impl Settings {
     pub fn load() -> Result<Self, Box<dyn Error>> {
-        let settings: Self = chess_config::load("config/engine.toml", iter::empty())?;
+        let settings: Self = Self::from_file("config/engine.toml")?;
         for (key, value) in [
             ("exploration", f64::from(settings.exploration)),
             ("eval_temperature", settings.eval_temperature),
