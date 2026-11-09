@@ -1,9 +1,9 @@
-use std::{path::Path, time::Instant};
+use std::{num::NonZeroUsize, path::PathBuf, time::Instant};
 
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap, loss, ops::log_softmax};
 use chess_network::{
-    Net,
+    ModelConfig, Net,
     checkpoint::{self, Checkpoint},
 };
 use rand::{SeedableRng, seq::SliceRandom};
@@ -12,9 +12,20 @@ use serde_json::json;
 
 use crate::data::{self, Batch, Result};
 
-const SEED: u64 = 42;
-const BATCH_SIZE: usize = 128;
-const LEARNING_RATE: f64 = 0.001;
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+    dataset: PathBuf,
+    output_dir: PathBuf,
+    value_from: PathBuf,
+    pub device: String,
+    epochs: NonZeroUsize,
+    batch_size: NonZeroUsize,
+    learning_rate: f64,
+    seed: u64,
+    material_hint: bool,
+    model: ModelConfig,
+}
 
 fn losses(net: &Net, batch: &Batch) -> candle_core::Result<(Tensor, Tensor)> {
     let (policy, value) = net.forward(
@@ -29,20 +40,30 @@ fn losses(net: &Net, batch: &Batch) -> candle_core::Result<(Tensor, Tensor)> {
     Ok((policy, loss::cross_entropy(&value, &batch.value)?))
 }
 
-pub fn run(
-    shard: &Path,
-    output: &Path,
-    value_from: &Path,
-    epochs: usize,
-    device: &Device,
-    material_hint: bool,
-) -> Result<()> {
-    if output.exists() {
-        return Err(format!("output already exists: {}", output.display()).into());
+pub fn run(config: Config, device: &Device) -> Result<()> {
+    let Config {
+        dataset,
+        output_dir,
+        value_from,
+        epochs,
+        batch_size,
+        learning_rate,
+        seed,
+        material_hint,
+        model,
+        ..
+    } = config;
+    let (epochs, batch_size) = (epochs.get(), batch_size.get());
+    if !learning_rate.is_finite() || learning_rate <= 0. {
+        return Err("training learning_rate must be positive and finite".into());
     }
-    let playing_value = Checkpoint::load(value_from, &Device::Cpu)?.value()?;
+    if output_dir.exists() {
+        return Err(format!("output already exists: {}", output_dir.display()).into());
+    }
+    let playing_value = Checkpoint::load(&value_from, &Device::Cpu)?.value()?;
     let started = Instant::now();
-    let data = data::load(shard, SEED)?;
+    let data = data::load(&dataset, seed)
+        .map_err(|error| format!("dataset {}: {error}", dataset.display()))?;
     println!(
         "train: {} games / {} positions; test: {} games / {} positions",
         data.train_games,
@@ -51,27 +72,28 @@ pub fn run(
         data.test.len()
     );
     if device.is_cuda() {
-        device.set_seed(SEED)?;
+        device.set_seed(seed)?;
     }
     let parameters = VarMap::new();
     let net = Net::new(
         VarBuilder::from_varmap(&parameters, DType::F32, device),
+        model,
         material_hint,
     )?;
     let mut optimizer = AdamW::new(
         parameters.all_vars(),
         ParamsAdamW {
-            lr: LEARNING_RATE,
+            lr: learning_rate,
             ..Default::default()
         },
     )?;
     let mut indices: Vec<_> = (0..data.train.len()).collect();
-    let mut rng = ChaCha8Rng::seed_from_u64(SEED);
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
     for epoch in 1..=epochs {
         let epoch_started = Instant::now();
         indices.shuffle(&mut rng);
         let mut totals = [0.; 2];
-        for chunk in indices.chunks(BATCH_SIZE) {
+        for chunk in indices.chunks(batch_size) {
             let batch = Batch::new(&data.train, chunk, device, material_hint)?;
             let (policy, value) = losses(&net, &batch)?;
             let objective = (&policy + &value)?;
@@ -100,6 +122,7 @@ pub fn run(
         .collect();
     let net = Net::new(
         VarBuilder::from_tensors(tensors.clone(), DType::F32, device),
+        model,
         material_hint,
     )?;
     let mut counts = [1.; 3];
@@ -110,7 +133,7 @@ pub fn run(
     let mut totals = [0.; 3];
     let mut value_baseline = 0.;
     let indices: Vec<_> = (0..data.test.len()).collect();
-    for chunk in indices.chunks(BATCH_SIZE) {
+    for chunk in indices.chunks(batch_size) {
         let batch = Batch::new(&data.test, chunk, device, material_hint)?;
         let (policy, value) = losses(&net, &batch)?;
         totals[0] += f64::from(policy.to_scalar::<f32>()?) * chunk.len() as f64;
@@ -132,13 +155,14 @@ pub fn run(
     );
 
     let mut config = checkpoint::config(
+        model,
         material_hint,
         json!({
-                "source": shard,
-                "seed": SEED,
+                "source": dataset,
+                "seed": seed,
                 "epochs": epochs,
-                "batch_size": BATCH_SIZE,
-                "learning_rate": LEARNING_RATE,
+                "batch_size": batch_size,
+                "learning_rate": learning_rate,
                 "device": if device.is_cuda() { "cuda" } else { "cpu" },
                 "dtype": "f32",
                 "layer_norm_backward": true,
@@ -154,10 +178,10 @@ pub fn run(
         }),
     );
     config["value_from"] = json!(value_from);
-    checkpoint::save(output, tensors, &playing_value, &config)?;
+    checkpoint::save(&output_dir, tensors, &playing_value, &config)?;
     println!(
         "saved {} in {:.1}s",
-        output.display(),
+        output_dir.display(),
         started.elapsed().as_secs_f64()
     );
     Ok(())

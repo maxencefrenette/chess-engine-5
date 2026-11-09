@@ -10,3 +10,4 @@ cuda = ["candle-core/cuda", "candle-nn/cuda"]
 candle-core.workspace = true
 candle-nn.workspace = true
 serde_json = "1"
+serde.workspace = true

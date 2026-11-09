@@ -8,12 +8,63 @@ use candle_nn::{
 
 pub const SQUARES: usize = 64;
 pub const INPUTS: usize = 21;
-pub const WIDTH: usize = 64;
-pub const HEADS: usize = 4;
-pub const BLOCKS: usize = 2;
-const FFN: usize = 128;
-const HEAD_WIDTH: usize = WIDTH / HEADS;
-const GEN: usize = 8;
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelConfig {
+    pub width: usize,
+    pub heads: usize,
+    pub layers: usize,
+    pub ffn_width: usize,
+    pub smolgen_compression: usize,
+    pub smolgen_hidden: usize,
+    pub smolgen_head_width: usize,
+    pub policy_width: usize,
+    pub value_channels: usize,
+    pub value_hidden_width: usize,
+}
+
+impl Default for ModelConfig {
+    fn default() -> Self {
+        // Dimensions of the original v1 checkpoints, before they saved all dimensions.
+        Self {
+            width: 64,
+            heads: 4,
+            layers: 2,
+            ffn_width: 128,
+            smolgen_compression: 2,
+            smolgen_hidden: 64,
+            smolgen_head_width: 8,
+            policy_width: 32,
+            value_channels: 4,
+            value_hidden_width: 64,
+        }
+    }
+}
+
+impl ModelConfig {
+    fn validate(self) -> Result<()> {
+        if [
+            self.width,
+            self.heads,
+            self.layers,
+            self.ffn_width,
+            self.smolgen_compression,
+            self.smolgen_hidden,
+            self.smolgen_head_width,
+            self.policy_width,
+            self.value_channels,
+            self.value_hidden_width,
+        ]
+        .contains(&0)
+            || !self.width.is_multiple_of(self.heads)
+        {
+            candle_core::bail!(
+                "model dimensions must be positive and width must be divisible by heads"
+            );
+        }
+        Ok(())
+    }
+}
 
 fn normalize(norm: &LayerNorm, x: &Tensor) -> Result<Tensor> {
     if !x.track_op() && !norm.weight().track_op() {
@@ -37,24 +88,36 @@ struct Smolgen {
 }
 
 impl Smolgen {
-    fn new(vb: VarBuilder) -> Result<Self> {
+    fn new(vb: VarBuilder, config: ModelConfig) -> Result<Self> {
         Ok(Self {
-            compress: linear_no_bias(WIDTH, 2, vb.pp("compress"))?,
-            mix: linear(SQUARES * 2, WIDTH, vb.pp("mix"))?,
-            mix_norm: layer_norm(WIDTH, 1e-5, vb.pp("mix_norm"))?,
-            heads: linear(WIDTH, HEADS * GEN, vb.pp("heads"))?,
-            head_norm: layer_norm(HEADS * GEN, 1e-5, vb.pp("head_norm"))?,
+            compress: linear_no_bias(config.width, config.smolgen_compression, vb.pp("compress"))?,
+            mix: linear(
+                SQUARES * config.smolgen_compression,
+                config.smolgen_hidden,
+                vb.pp("mix"),
+            )?,
+            mix_norm: layer_norm(config.smolgen_hidden, 1e-5, vb.pp("mix_norm"))?,
+            heads: linear(
+                config.smolgen_hidden,
+                config.heads * config.smolgen_head_width,
+                vb.pp("heads"),
+            )?,
+            head_norm: layer_norm(
+                config.heads * config.smolgen_head_width,
+                1e-5,
+                vb.pp("head_norm"),
+            )?,
         })
     }
 
-    fn forward(&self, x: &Tensor, projection: &Linear) -> Result<Tensor> {
+    fn forward(&self, x: &Tensor, projection: &Linear, config: ModelConfig) -> Result<Tensor> {
         let batch = x.dim(0)?;
         let compressed = self.compress.forward(x)?.flatten_from(1)?;
         let mixed = normalize(&self.mix_norm, &self.mix.forward(&compressed)?.silu()?)?;
         let heads = normalize(&self.head_norm, &self.heads.forward(&mixed)?.silu()?)?;
         projection
-            .forward(&heads.reshape((batch, HEADS, GEN))?)?
-            .reshape((batch, HEADS, SQUARES, SQUARES))
+            .forward(&heads.reshape((batch, config.heads, config.smolgen_head_width))?)?
+            .reshape((batch, config.heads, SQUARES, SQUARES))
     }
 }
 
@@ -69,42 +132,43 @@ struct Block {
 }
 
 impl Block {
-    fn new(vb: VarBuilder) -> Result<Self> {
+    fn new(vb: VarBuilder, config: ModelConfig) -> Result<Self> {
         Ok(Self {
-            qkv: linear(WIDTH, 3 * WIDTH, vb.pp("qkv"))?,
-            attention_out: linear(WIDTH, WIDTH, vb.pp("attention_out"))?,
-            attention_norm: layer_norm(WIDTH, 1e-5, vb.pp("attention_norm"))?,
-            expand: linear(WIDTH, FFN, vb.pp("expand"))?,
-            contract: linear(FFN, WIDTH, vb.pp("contract"))?,
-            ffn_norm: layer_norm(WIDTH, 1e-5, vb.pp("ffn_norm"))?,
-            smolgen: Smolgen::new(vb.pp("smolgen"))?,
+            qkv: linear(config.width, 3 * config.width, vb.pp("qkv"))?,
+            attention_out: linear(config.width, config.width, vb.pp("attention_out"))?,
+            attention_norm: layer_norm(config.width, 1e-5, vb.pp("attention_norm"))?,
+            expand: linear(config.width, config.ffn_width, vb.pp("expand"))?,
+            contract: linear(config.ffn_width, config.width, vb.pp("contract"))?,
+            ffn_norm: layer_norm(config.width, 1e-5, vb.pp("ffn_norm"))?,
+            smolgen: Smolgen::new(vb.pp("smolgen"), config)?,
         })
     }
 
-    fn forward(&self, x: &Tensor, projection: &Linear) -> Result<Tensor> {
+    fn forward(&self, x: &Tensor, projection: &Linear, config: ModelConfig) -> Result<Tensor> {
         let batch = x.dim(0)?;
         let qkv = self.qkv.forward(x)?;
         let heads = |part| -> Result<Tensor> {
-            qkv.narrow(2, part * WIDTH, WIDTH)?
-                .reshape((batch, SQUARES, HEADS, HEAD_WIDTH))?
+            qkv.narrow(2, part * config.width, config.width)?
+                .reshape((batch, SQUARES, config.heads, config.width / config.heads))?
                 .transpose(1, 2)?
                 .contiguous()
         };
         let (q, k, v) = (heads(0)?, heads(1)?, heads(2)?);
         let scores = q
             .matmul(&k.transpose(2, 3)?)?
-            .affine((HEAD_WIDTH as f64).sqrt().recip(), 0.)?;
-        let bias = self.smolgen.forward(x, projection)?;
+            .affine(((config.width / config.heads) as f64).sqrt().recip(), 0.)?;
+        let bias = self.smolgen.forward(x, projection, config)?;
         let scores = (&scores + &bias)?;
         let probs = if scores.track_op() {
             softmax(&scores, 3)?
         } else {
             softmax_last_dim(&scores)?
         };
-        let attention = probs
-            .matmul(&v)?
-            .transpose(1, 2)?
-            .reshape((batch, SQUARES, WIDTH))?;
+        let attention =
+            probs
+                .matmul(&v)?
+                .transpose(1, 2)?
+                .reshape((batch, SQUARES, config.width))?;
         let x = normalize(
             &self.attention_norm,
             &(x + self.attention_out.forward(&attention)?)?,
@@ -117,9 +181,10 @@ impl Block {
 }
 
 pub struct Net {
+    config: ModelConfig,
     input: Linear,
     square: Tensor,
-    blocks: Vec<Block>,
+    layers: Vec<Block>,
     smolgen_projection: Linear,
     policy_query: Linear,
     policy_key: Linear,
@@ -131,36 +196,46 @@ pub struct Net {
 }
 
 impl Net {
-    pub fn new(vb: VarBuilder, material_hint: bool) -> Result<Self> {
+    pub fn new(vb: VarBuilder, config: ModelConfig, material_hint: bool) -> Result<Self> {
+        config.validate()?;
         Ok(Self {
-            input: linear(INPUTS, WIDTH, vb.pp("input"))?,
+            config,
+            input: linear(INPUTS, config.width, vb.pp("input"))?,
             square: vb.get_with_hints(
-                (SQUARES, WIDTH),
+                (SQUARES, config.width),
                 "square",
                 Init::Randn {
                     mean: 0.0,
                     stdev: 0.02,
                 },
             )?,
-            blocks: (0..BLOCKS)
-                .map(|i| Block::new(vb.pp("blocks").pp(i)))
+            layers: (0..config.layers)
+                .map(|i| Block::new(vb.pp("blocks").pp(i), config))
                 .collect::<Result<_>>()?,
             smolgen_projection: linear_no_bias(
-                GEN,
+                config.smolgen_head_width,
                 SQUARES * SQUARES,
                 vb.pp("smolgen_projection"),
             )?,
-            policy_query: linear(WIDTH, 32, vb.pp("policy_query"))?,
-            policy_key: linear(WIDTH, 32, vb.pp("policy_key"))?,
-            promotion: linear_no_bias(32, 4, vb.pp("promotion"))?,
-            value_square: linear(WIDTH, 4, vb.pp("value_square"))?,
-            value_hidden: linear(SQUARES * 4, WIDTH, vb.pp("value_hidden"))?,
-            value_out: linear(WIDTH, 3, vb.pp("value_out"))?,
+            policy_query: linear(config.width, config.policy_width, vb.pp("policy_query"))?,
+            policy_key: linear(config.width, config.policy_width, vb.pp("policy_key"))?,
+            promotion: linear_no_bias(config.policy_width, 4, vb.pp("promotion"))?,
+            value_square: linear(config.width, config.value_channels, vb.pp("value_square"))?,
+            value_hidden: linear(
+                SQUARES * config.value_channels,
+                config.value_hidden_width,
+                vb.pp("value_hidden"),
+            )?,
+            value_out: linear(config.value_hidden_width, 3, vb.pp("value_out"))?,
             // Start the residual at zero so the hinted and plain nets have the same initial function.
             material_hint: material_hint
                 .then(|| {
-                    vb.get_with_hints((WIDTH, 1), "material_hint.weight", Init::Const(0.0))
-                        .map(|weight| Linear::new(weight, None))
+                    vb.get_with_hints(
+                        (config.value_hidden_width, 1),
+                        "material_hint.weight",
+                        Init::Const(0.0),
+                    )
+                    .map(|weight| Linear::new(weight, None))
                 })
                 .transpose()?,
         })
@@ -204,8 +279,8 @@ impl Net {
 
     fn encode(&self, position: &Tensor) -> Result<Tensor> {
         let mut x = self.input.forward(position)?.broadcast_add(&self.square)?;
-        for block in &self.blocks {
-            x = block.forward(&x, &self.smolgen_projection)?;
+        for layer in &self.layers {
+            x = layer.forward(&x, &self.smolgen_projection, self.config)?;
         }
         Ok(x)
     }
@@ -221,7 +296,7 @@ impl Net {
         let k = self.policy_key.forward(x)?;
         let logits = q
             .matmul(&k.transpose(1, 2)?)?
-            .affine(32_f64.sqrt().recip(), 0.)?;
+            .affine((self.config.policy_width as f64).sqrt().recip(), 0.)?;
         let legal = logits.flatten_from(1)?.gather(move_index, 1)?;
         let offsets = self
             .promotion
@@ -283,7 +358,11 @@ mod tests {
     fn value_loss_reaches_smolgen_and_material_hint() -> Result<()> {
         let device = &Device::Cpu;
         let params = VarMap::new();
-        let net = Net::new(VarBuilder::from_varmap(&params, DType::F32, device), true)?;
+        let net = Net::new(
+            VarBuilder::from_varmap(&params, DType::F32, device),
+            ModelConfig::default(),
+            true,
+        )?;
         let board = Tensor::randn(0f32, 1., (1, SQUARES, INPUTS), device)?;
         let moves = Tensor::zeros((1, 1), DType::U32, device)?;
         let promotes = Tensor::zeros((1, 1), DType::F32, device)?;

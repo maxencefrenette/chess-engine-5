@@ -14,3 +14,5 @@ rand_chacha = "0.9"
 serde_json = "1"
 chess-network = { path = "../network" }
 chess-data = { path = "../data" }
+serde.workspace = true
+chess-config = { path = "../config" }

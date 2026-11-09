@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, io, num::NonZeroU32};
+use std::{collections::BTreeMap, io, num::NonZeroU32, path::PathBuf};
 
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -71,11 +71,18 @@ impl ActiveGame {
     }
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Options {
-    pub batch: u16,
-    pub visits: NonZeroU32,
-    pub max_pairs: u64,
-    pub seed: u64,
+    pub baseline_dir: PathBuf,
+    pub candidate_dir: PathBuf,
+    pub device: String,
+    batch: u16,
+    #[serde(rename = "visits_per_move")]
+    visits: NonZeroU32,
+    max_pairs: u64,
+    seed: u64,
+    sprt: sprt::Config,
 }
 
 pub fn run(options: Options, players: [&Hybrid; 2]) -> io::Result<()> {
@@ -84,6 +91,10 @@ pub fn run(options: Options, players: [&Hybrid; 2]) -> io::Result<()> {
             "batch must be positive and max pairs must be positive and fit twice in u64",
         ));
     }
+    if !options.sprt.validate() {
+        return Err(io::Error::other("invalid SPRT Elo bounds or error rates"));
+    }
+    let (lower, upper) = options.sprt.boundaries();
     let limit = 2 * options.max_pairs;
     let mut next_id = u64::from(options.batch).min(limit);
     let mut active: Vec<_> = (0..next_id)
@@ -96,9 +107,11 @@ pub fn run(options: Options, players: [&Hybrid; 2]) -> io::Result<()> {
     let mut llr = 0.0;
     let mut max_batches = [0; 2];
     println!(
-        "checkpoint match; SPRT [{}, {}] logistic Elo, alpha=beta=0.05; batch={} visits={} max_pairs={} seed={}",
-        sprt::LOWER_ELO,
-        sprt::UPPER_ELO,
+        "checkpoint match; SPRT [{}, {}] logistic Elo, alpha={} beta={}; batch={} visits={} max_pairs={} seed={}",
+        options.sprt.lower_elo,
+        options.sprt.upper_elo,
+        options.sprt.alpha,
+        options.sprt.beta,
         options.batch,
         options.visits,
         options.max_pairs,
@@ -132,17 +145,18 @@ pub fn run(options: Options, players: [&Hybrid; 2]) -> io::Result<()> {
             wdl[2 - first] += 1;
             wdl[2 - second] += 1;
             next_pair += 1;
-            llr = sprt::llr(counts);
-            if next_pair.is_multiple_of(10) || llr.abs() >= sprt::BOUNDARY {
+            llr = options.sprt.llr(counts);
+            let decided = llr <= lower || llr >= upper;
+            if next_pair.is_multiple_of(10) || decided {
                 println!(
                     "pairs={next_pair} candidate W/D/L={wdl:?} pentanomial={counts:?} LLR={llr:.4}"
                 );
             }
-            if llr.abs() >= sprt::BOUNDARY {
-                let (hypothesis, elo) = if llr > 0.0 {
-                    ("H1", sprt::UPPER_ELO)
+            if decided {
+                let (hypothesis, elo) = if llr >= upper {
+                    ("H1", options.sprt.upper_elo)
                 } else {
-                    ("H0", sprt::LOWER_ELO)
+                    ("H0", options.sprt.lower_elo)
                 };
                 println!(
                     "accepted {hypothesis} ({elo:+} Elo); largest inference batches (baseline/candidate)={max_batches:?}"

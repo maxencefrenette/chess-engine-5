@@ -10,7 +10,7 @@ use chess_engine::{
 const USAGE: &str = "usage: chess-engine [--cuda] <command>
   search MODEL_DIR VISITS [MOVE ...]
   self-play MODEL_DIR OUTPUT_DIR GAMES SEED [BATCH=16]
-  match BASELINE_DIR CANDIDATE_DIR [BATCH=8] [VISITS=800] [MAX_PAIRS=10000] [SEED=42]";
+  eval-model [--config PATH] [--set KEY=VALUE]...";
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
@@ -20,28 +20,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         ("cpu", first)
     };
-    if !matches!(command.as_str(), "search" | "self-play" | "match") {
-        return Err(USAGE.into());
+    if command == "eval-model" && device == "cpu" {
+        let options: Options = chess_config::load("config/eval-model.toml", args)?;
+        let baseline = Hybrid::load(&options.baseline_dir, &options.device)?;
+        let candidate = Hybrid::load(&options.candidate_dir, &options.device)?;
+        println!(
+            "baseline={} candidate={} device={}",
+            options.baseline_dir.display(),
+            options.candidate_dir.display(),
+            options.device
+        );
+        return Ok(matches::run(options, [&baseline, &candidate])?);
     }
     let model = args.next().ok_or(USAGE)?;
 
     match command.as_str() {
-        "match" => {
-            let candidate_model = args.next().ok_or(USAGE)?;
-            let options = Options {
-                batch: args.next().as_deref().unwrap_or("8").parse()?,
-                visits: args.next().as_deref().unwrap_or("800").parse()?,
-                max_pairs: args.next().as_deref().unwrap_or("10000").parse()?,
-                seed: args.next().as_deref().unwrap_or("42").parse()?,
-            };
-            if args.next().is_some() {
-                return Err(USAGE.into());
-            }
-            let baseline = Hybrid::load(Path::new(&model), device)?;
-            let candidate = Hybrid::load(Path::new(&candidate_model), device)?;
-            println!("baseline={model} candidate={candidate_model} device={device}");
-            matches::run(options, [&baseline, &candidate])?;
-        }
         "self-play" => {
             let output = args.next().ok_or(USAGE)?;
             let games = args.next().ok_or(USAGE)?.parse()?;
@@ -78,7 +71,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{} {}", entry.mv, entry.visits);
             }
         }
-        _ => unreachable!("command already checked"),
+        _ => return Err(USAGE.into()),
     }
     Ok(())
 }

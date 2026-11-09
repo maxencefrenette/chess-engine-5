@@ -1,4 +1,4 @@
-use std::{env, error::Error, num::NonZeroUsize, path::Path, process::ExitCode};
+use std::{env, error::Error, process::ExitCode};
 
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{Optimizer, SGD, VarBuilder, VarMap};
@@ -6,7 +6,8 @@ use candle_nn::{Optimizer, SGD, VarBuilder, VarMap};
 mod data;
 mod train;
 
-const USAGE: &str = "usage: chess-trainer check-device [cpu|cuda] | train SHARD OUTPUT_DIR VALUE_FROM_DIR [EPOCHS=5] [cuda|cpu] [--material-hint]";
+const USAGE: &str =
+    "usage: chess-trainer check-device [cpu|cuda] | train [--config PATH] [--set KEY=VALUE]...";
 
 fn run() -> Result<(), Box<dyn Error>> {
     let mut args = env::args().skip(1);
@@ -20,31 +21,9 @@ fn run() -> Result<(), Box<dyn Error>> {
             check_device(&backend, &device(&backend)?)
         }
         Some("train") => {
-            let shard = args.next().ok_or(USAGE)?;
-            let output = args.next().ok_or(USAGE)?;
-            let value_from = args.next().ok_or(USAGE)?;
-            let epochs = args
-                .next()
-                .as_deref()
-                .unwrap_or("5")
-                .parse::<NonZeroUsize>()?;
-            let backend = args.next().unwrap_or_else(|| "cuda".into());
-            let hint = args.next();
-            if hint
-                .as_deref()
-                .is_some_and(|flag| flag != "--material-hint")
-                || args.next().is_some()
-            {
-                return Err(USAGE.into());
-            }
-            train::run(
-                Path::new(&shard),
-                Path::new(&output),
-                Path::new(&value_from),
-                epochs.get(),
-                &device(&backend)?,
-                hint.is_some(),
-            )
+            let config: train::Config = chess_config::load("config/training.toml", args)?;
+            let device = device(&config.device)?;
+            train::run(config, &device)
         }
         _ => Err(USAGE.into()),
     }

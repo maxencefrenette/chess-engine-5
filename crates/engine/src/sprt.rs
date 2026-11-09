@@ -1,10 +1,43 @@
 // Scores are the candidate's total points per color-swapped pair, in half-points.
-pub(crate) const LOWER_ELO: f64 = 0.0;
-pub(crate) const UPPER_ELO: f64 = 20.0;
-pub(crate) const BOUNDARY: f64 = 2.944_438_979_166_440_3;
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Config {
+    pub lower_elo: f64,
+    pub upper_elo: f64,
+    pub alpha: f64,
+    pub beta: f64,
+}
+
+impl Config {
+    pub fn validate(&self) -> bool {
+        self.lower_elo.is_finite()
+            && self.upper_elo.is_finite()
+            && self.lower_elo < self.upper_elo
+            && score(self.lower_elo) > 0.0
+            && score(self.upper_elo) < 1.0
+            && self.alpha > 0.0
+            && self.beta > 0.0
+            && self.alpha + self.beta < 1.0
+    }
+
+    pub fn boundaries(&self) -> (f64, f64) {
+        (
+            (self.beta / (1.0 - self.alpha)).ln(),
+            ((1.0 - self.beta) / self.alpha).ln(),
+        )
+    }
+
+    pub fn llr(&self, counts: [u64; 5]) -> f64 {
+        log_likelihood(counts, self.upper_elo) - log_likelihood(counts, self.lower_elo)
+    }
+}
+
+fn score(elo: f64) -> f64 {
+    1.0 / (1.0 + 10_f64.powf(-elo / 400.0))
+}
 
 fn log_likelihood(counts: [u64; 5], elo: f64) -> f64 {
-    let score = 1.0 / (1.0 + 10_f64.powf(-elo / 400.0));
+    let score = score(elo);
     let distances = std::array::from_fn::<_, 5, _>(|i| i as f64 / 4.0 - score);
     // Regularize unobserved bins so the constrained solution has full support.
     let weights = counts.map(|n| if n == 0 { 0.001 } else { n as f64 });
@@ -34,10 +67,6 @@ fn log_likelihood(counts: [u64; 5], elo: f64) -> f64 {
         .sum::<f64>()
 }
 
-pub(crate) fn llr(counts: [u64; 5]) -> f64 {
-    log_likelihood(counts, UPPER_ELO) - log_likelihood(counts, LOWER_ELO)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -46,10 +75,17 @@ mod tests {
     fn logistic_pair_likelihood_matches_closed_form_for_balanced_decisive_pairs() {
         // With only the two extreme bins occupied, the fitted probabilities
         // approach those of a Bernoulli trial. Regularization is negligible here.
-        let score = 1.0 / (1.0 + 10_f64.powf(-UPPER_ELO / 400.0));
+        let config = Config {
+            lower_elo: 0.,
+            upper_elo: 20.,
+            alpha: 0.05,
+            beta: 0.05,
+        };
+        let score = score(config.upper_elo);
+        let (lower, upper) = config.boundaries();
         let expected = 1000.0 * (4.0 * score * (1.0 - score)).ln();
-        assert!((llr([1000, 0, 0, 0, 1000]) - expected).abs() < 0.001);
-        assert!(llr([0, 0, 0, 0, 200]) > BOUNDARY);
-        assert!(llr([200, 0, 0, 0, 0]) < -BOUNDARY);
+        assert!((config.llr([1000, 0, 0, 0, 1000]) - expected).abs() < 0.001);
+        assert!(config.llr([0, 0, 0, 0, 200]) > upper);
+        assert!(config.llr([200, 0, 0, 0, 0]) < lower);
     }
 }

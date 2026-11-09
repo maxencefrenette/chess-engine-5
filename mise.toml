@@ -24,6 +24,10 @@ run = [
   "mise run with-cuda -- cargo run --locked -p chess-trainer --features cuda -- check-device cuda",
 ]
 
-[tasks.match]
+[tasks.eval-model]
 description = "Evaluate a candidate checkpoint against a baseline on CUDA"
-run = "mise run with-cuda -- cargo run --release --locked -p chess-engine --features cuda -- --cuda match"
+run = "mise run with-cuda -- cargo run --release --locked -p chess-engine --features cuda -- eval-model"
+
+[tasks.train]
+description = "Train a model using the training configuration"
+run = "mise run with-cuda -- cargo run --locked -p chess-trainer --features cuda -- train"

@@ -1,0 +1,21 @@
+output_dir = "/data/chess/chess-engine-5/models/smolgen-experiment"
+value_from = "/data/chess/chess-engine-5/models/smolgen-v1-1000games-fullgrad-seed42"
+device = "cuda"
+dataset = "/data/chess/chess-engine-5/training-data/v1/1794179515052280911-75339/part-00000.parquet"
+epochs = 5
+batch_size = 128
+learning_rate = 0.001
+seed = 42
+material_hint = false
+
+[model]
+width = 64
+heads = 4
+layers = 2
+ffn_width = 128
+smolgen_compression = 2
+smolgen_hidden = 64
+smolgen_head_width = 8
+policy_width = 32
+value_channels = 4
+value_hidden_width = 64

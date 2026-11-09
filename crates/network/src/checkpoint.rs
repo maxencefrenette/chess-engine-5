@@ -4,7 +4,7 @@ use candle_core::{DType, Device, Tensor, safetensors};
 use candle_nn::VarBuilder;
 use serde_json::{Value, json};
 
-use crate::{BLOCKS, HEADS, INPUTS, Net, WIDTH};
+use crate::{INPUTS, ModelConfig, Net};
 
 const CONFIG_FILE: &str = "config.json";
 const WEIGHTS_FILE: &str = "weights.safetensors";
@@ -17,25 +17,23 @@ pub struct PieceValue {
     pub bias: [f32; 3],
 }
 
-fn format_fields() -> [(&'static str, Value); 9] {
+fn format_fields() -> [(&'static str, Value); 6] {
     [
         ("format_version", json!(1)),
         ("architecture", json!("lc0_style_smolgen_v1")),
         ("position_encoding", json!("packed_board_planes_v1")),
         ("move_encoding", json!("ce5_packed_move_v1")),
         ("value_model", json!("side_relative_piece_counts_v1")),
-        ("width", json!(WIDTH)),
-        ("heads", json!(HEADS)),
-        ("blocks", json!(BLOCKS)),
         ("input_channels", json!(INPUTS)),
     ]
 }
 
-pub fn config(material_hint: bool, training: Value) -> Value {
+pub fn config(model: ModelConfig, material_hint: bool, training: Value) -> Value {
     let mut config = json!({
         "material_hint": material_hint.then_some(MATERIAL_HINT),
         "value_order": ["loss", "draw", "win"],
         "training": training,
+        "model": model,
     });
     for (key, expected) in format_fields() {
         config[key] = expected;
@@ -46,6 +44,7 @@ pub fn config(material_hint: bool, training: Value) -> Value {
 pub struct Checkpoint {
     tensors: HashMap<String, Tensor>,
     material_hint: bool,
+    model: ModelConfig,
 }
 
 impl Checkpoint {
@@ -70,11 +69,22 @@ impl Checkpoint {
             hint if hint == MATERIAL_HINT => true,
             _ => return Err(io::Error::other("unsupported material hint")),
         };
+        let model = if let Some(model) = config.get("model") {
+            serde_json::from_value(model.clone())?
+        } else {
+            ModelConfig {
+                width: serde_json::from_value(config["width"].clone())?,
+                heads: serde_json::from_value(config["heads"].clone())?,
+                layers: serde_json::from_value(config["blocks"].clone())?,
+                ..ModelConfig::default()
+            }
+        };
         let tensors =
             safetensors::load(directory.join(WEIGHTS_FILE), device).map_err(io::Error::other)?;
         Ok(Self {
             tensors,
             material_hint,
+            model,
         })
     }
 
@@ -106,6 +116,7 @@ impl Checkpoint {
     pub fn into_policy(self, device: &Device) -> candle_core::Result<Net> {
         Net::new(
             VarBuilder::from_tensors(self.tensors, DType::F32, device),
+            self.model,
             self.material_hint,
         )
     }
