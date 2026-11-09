@@ -1,4 +1,4 @@
-baseline_dir = "/data/chess/chess-engine-5/models/smolgen-v1-1000games-fullgrad-seed42"
+baseline_dir = "/data/chess/chess-engine-5/models/smolgen-v1-1000games-policy-piece-wdl-seed42"
 device = "cuda"
 batch = 8
 visits_per_move = 800
