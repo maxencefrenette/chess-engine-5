@@ -5,6 +5,10 @@ rust = "1.95.0"
 description = "Run the Rust workspace tests"
 run = "cargo test --workspace --locked"
 
+[tasks.lint]
+description = "Run Clippy on the Rust workspace"
+run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
+
 [tasks.with-cuda]
 hide = true
 tools = { "conda:cuda-toolkit" = { version = "13.2.2", channel = "conda-forge" } }

@@ -119,16 +119,17 @@ fn time_matched_visits(
             player.evaluate(&batch)?;
         }
     }
-    let mut timings = [[Duration::ZERO; SAMPLES]; 2];
-    for sample in 0..SAMPLES {
+    let mut timings = [[Duration::ZERO; 2]; SAMPLES];
+    for (sample, timing) in timings.iter_mut().enumerate() {
         for offset in 0..2 {
             let side = (sample + offset) % 2;
             let start = Instant::now();
             players[side].evaluate(&batch)?;
-            timings[side][sample] = start.elapsed();
+            timing[side] = start.elapsed();
         }
     }
-    let [baseline, candidate] = timings.map(|mut samples| {
+    let [baseline, candidate] = [0, 1].map(|side| {
+        let mut samples = timings.map(|sample| sample[side]);
         samples.sort_unstable();
         samples[SAMPLES / 2].as_secs_f64()
     });
