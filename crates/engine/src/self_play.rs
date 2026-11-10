@@ -191,7 +191,7 @@ pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) ->
         "draws": draws,
         "start_position": "standard",
         "visits_per_move": config.visits_per_move.get(),
-        "evaluator": "piece-count-wdl-v1",
+        "value": model.value_config(),
         "priors": "smolgen-policy-v1",
         "checkpoint": model.model_dir,
         "device": config.device,

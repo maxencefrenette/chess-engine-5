@@ -1,10 +1,10 @@
 output_dir = "/data/chess/chess-engine-5/models/smolgen-experiment"
 device = "cuda"
-dataset = "/data/chess/chess-engine-5/training-data/v1/1794179515052280911-75339/part-00000.parquet"
+dataset = "/data/chess/chess-engine-5/training-data/v2/1794316173826234974-1165184"
 # After each pass over the selected positions, reshuffle and start a new epoch
 # until the optimizer_steps budget is exhausted.
-train_positions = 182378
-optimizer_steps = 7125
+train_positions = 250301
+optimizer_steps = 30151
 batch_size = 128
 seed = 42
 
@@ -13,16 +13,17 @@ kind = "adamw"
 learning_rate = 0.001
 beta1 = 0.9
 beta2 = 0.999
-eps = 1e-8
+eps = 1e-08
 weight_decay = 0.01
 schedule = { mode = "constant" }
 
 [model]
 width = 64
 heads = 4
-layers = 2
+layers = 1
 ffn_width = 128
 policy_width = 32
+value = { kind = "piece_mlp", hidden = 16 }
 
 [model.smolgen]
 mode = "enabled"

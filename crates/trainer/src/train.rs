@@ -2,7 +2,7 @@ use std::{fmt::Write, fs, num::NonZeroUsize, path::PathBuf, time::Instant};
 
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap, loss, ops::log_softmax};
-use chess_network::{ModelConfig, Net, checkpoint, piece_value::PieceValue};
+use chess_network::{ModelConfig, Net, checkpoint};
 use rand::{SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha8Rng;
 use serde_json::json;
@@ -84,17 +84,16 @@ impl Schedule {
     }
 }
 
-fn losses(
-    net: &Net,
-    playing_value: &PieceValue,
-    batch: &Batch,
-) -> candle_core::Result<[Tensor; 2]> {
-    let policy = batch.inputs.logits(net)?;
+fn losses(net: &Net, batch: &Batch) -> candle_core::Result<[Tensor; 2]> {
+    let (policy, wdl) = batch.inputs.logits(net, batch.piece_features.as_ref())?;
     let log_probs = log_softmax(&(&policy + &batch.mask)?, 1)?;
     let policy = (&log_probs * &batch.policy)?.sum(1)?.neg()?.mean_all()?;
     Ok([
         policy,
-        loss::cross_entropy(&playing_value.logits(&batch.piece_features)?, &batch.value)?,
+        loss::cross_entropy(
+            &wdl.expect("training batch supplies value inputs"),
+            &batch.value,
+        )?,
     ])
 }
 
@@ -111,6 +110,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         ..
     } = config;
     let OptimizerConfig::Adamw(adamw) = optimizer;
+    let uses_piece_counts = model.value.uses_piece_counts();
     let (planned_steps, batch_size) = (planned_steps.get(), batch_size.get());
     if !adamw.learning_rate.is_finite() || adamw.learning_rate <= 0. {
         return Err("training optimizer.learning_rate must be positive and finite".into());
@@ -144,7 +144,6 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         VarBuilder::from_varmap(&parameters, DType::F32, device),
         model,
     )?;
-    let playing_value = PieceValue::new(VarBuilder::from_varmap(&parameters, DType::F32, device))?;
     let mut optimizer = AdamW::new(
         parameters.all_vars(),
         ParamsAdamW {
@@ -175,8 +174,8 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
             .chunks(batch_size)
             .take(planned_steps - optimizer_steps)
         {
-            let batch = Batch::new(&data.train, chunk, device)?;
-            let [policy, value] = losses(&net, &playing_value, &batch)?;
+            let batch = Batch::new(&data.train, chunk, device, uses_piece_counts)?;
+            let [policy, value] = losses(&net, &batch)?;
             let objective = (&policy + &value)?;
             let lr =
                 adamw.learning_rate * adamw.schedule.multiplier(optimizer_steps, planned_steps);
@@ -236,7 +235,6 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         .map(|(name, var)| (name.clone(), var.as_tensor().detach()))
         .collect();
     let builder = VarBuilder::from_tensors(tensors.clone(), DType::F32, device);
-    let playing_value = PieceValue::new(builder.clone())?;
     let net = Net::new(builder, model)?;
     let mut counts = [1.; 3];
     for row in &data.train {
@@ -247,8 +245,8 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     let mut value_baseline = 0.;
     let indices: Vec<_> = (0..data.test.len()).collect();
     for chunk in indices.chunks(batch_size) {
-        let batch = Batch::new(&data.test, chunk, device)?;
-        for (total, loss) in totals.iter_mut().zip(losses(&net, &playing_value, &batch)?) {
+        let batch = Batch::new(&data.test, chunk, device, uses_piece_counts)?;
+        for (total, loss) in totals.iter_mut().zip(losses(&net, &batch)?) {
             *total += f64::from(loss.to_scalar::<f32>()?) * chunk.len() as f64;
         }
         totals[2] += batch.uniform_loss;
@@ -337,7 +335,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use chess_config::TomlConfig;
-    use chess_network::{INPUTS, SQUARES};
+    use chess_network::{INPUTS, SQUARES, value::ValueConfig};
 
     use super::*;
 
@@ -367,7 +365,7 @@ mod tests {
         let board = Tensor::randn(0f32, 1., (1, SQUARES, INPUTS), device)?;
         let moves = Tensor::zeros((1, 1), DType::U32, device)?;
         let promotes = Tensor::zeros((1, 1), DType::F32, device)?;
-        let policy = net.policy(&board, &moves, &moves, &promotes)?;
+        let (policy, _) = net.forward(&board, &moves, &moves, &promotes, None)?;
         let grads = policy.sum_all()?.backward()?;
         let params = params.data().lock().unwrap();
         for name in [
@@ -378,6 +376,35 @@ mod tests {
             let grad = grads
                 .get(params[name].as_tensor())
                 .unwrap_or_else(|| panic!("no gradient for {name}"));
+            assert!(grad.abs()?.sum_all()?.to_scalar::<f32>()? > 0.0, "{name}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn transformer_wdl_loss_reaches_the_shared_trunk() -> Result<()> {
+        let mut config = Config::from_repo_file("training.toml")?;
+        config.model.layers = 1;
+        config.model.value = ValueConfig::Transformer {
+            square_channels: 8.try_into()?,
+            hidden: 32.try_into()?,
+        };
+        let device = &Device::Cpu;
+        let params = VarMap::new();
+        let net = Net::new(
+            VarBuilder::from_varmap(&params, DType::F32, device),
+            config.model,
+        )?;
+        let boards = Tensor::randn(0f32, 1., (2, SQUARES, INPUTS), device)?;
+        let moves = Tensor::zeros((2, 1), DType::U32, device)?;
+        let promotes = Tensor::zeros((2, 1), DType::F32, device)?;
+        let (_, wdl) = net.forward(&boards, &moves, &moves, &promotes, None)?;
+        let labels = Tensor::new(&[0_u32, 2], device)?;
+        let grads =
+            loss::cross_entropy(&wdl.expect("transformer WDL logits"), &labels)?.backward()?;
+        let params = params.data().lock().unwrap();
+        for name in ["input.weight", "transformer_value.output.weight"] {
+            let grad = grads.get(params[name].as_tensor()).expect("value gradient");
             assert!(grad.abs()?.sum_all()?.to_scalar::<f32>()? > 0.0, "{name}");
         }
         Ok(())

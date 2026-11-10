@@ -1,13 +1,14 @@
 pub mod checkpoint;
 pub mod inference;
-pub mod piece_value;
 pub mod policy_inputs;
+pub mod value;
 
 use candle_core::{Result, Tensor};
 use candle_nn::{
     Init, LayerNorm, Linear, Module, VarBuilder, layer_norm, linear, linear_no_bias,
     ops::{layer_norm_slow, softmax, softmax_last_dim},
 };
+use value::{CpuPieceValue, ValueConfig, ValueHead};
 
 pub const SQUARES: usize = 64;
 pub const INPUTS: usize = 21;
@@ -20,6 +21,7 @@ pub struct ModelConfig {
     pub ffn_width: usize,
     pub policy_width: usize,
     pub smolgen: SmolgenConfig,
+    pub value: ValueConfig,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
@@ -203,6 +205,7 @@ pub struct Net {
     policy_query: Linear,
     policy_key: Linear,
     promotion: Linear,
+    value: ValueHead,
 }
 
 impl Net {
@@ -233,22 +236,26 @@ impl Net {
             policy_query: linear(config.width, config.policy_width, vb.pp("policy_query"))?,
             policy_key: linear(config.width, config.policy_width, vb.pp("policy_key"))?,
             promotion: linear_no_bias(config.policy_width, 4, vb.pp("promotion"))?,
+            value: ValueHead::new(vb, config)?,
         })
     }
 
-    pub fn policy(
+    pub(crate) fn cpu_piece_value(&self) -> Result<Option<CpuPieceValue>> {
+        self.value.cpu_piece_value()
+    }
+
+    pub fn forward(
         &self,
         position: &Tensor,
         move_index: &Tensor,
         promotion_index: &Tensor,
         promotes: &Tensor,
-    ) -> Result<Tensor> {
-        self.legal_policy(
-            &self.encode(position)?,
-            move_index,
-            promotion_index,
-            promotes,
-        )
+        pieces: Option<&Tensor>,
+    ) -> Result<(Tensor, Option<Tensor>)> {
+        let encoded = self.encode(position)?;
+        let policy = self.legal_policy(&encoded, move_index, promotion_index, promotes)?;
+        let wdl = self.value.logits(&encoded, pieces)?;
+        Ok((policy, wdl))
     }
 
     fn encode(&self, position: &Tensor) -> Result<Tensor> {

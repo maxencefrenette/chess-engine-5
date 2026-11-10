@@ -8,8 +8,8 @@ use rand_chacha::ChaCha8Rng;
 
 use chess_network::{
     INPUTS, SQUARES, encode_position,
-    piece_value::{PIECE_FEATURES, feature_tensor, piece_features},
     policy_inputs::PolicyInputs,
+    value::{PIECE_FEATURES, feature_tensor, piece_features},
 };
 
 pub struct Row {
@@ -110,12 +110,17 @@ pub struct Batch {
     pub mask: Tensor,
     pub policy: Tensor,
     pub value: Tensor,
-    pub piece_features: Tensor,
+    pub piece_features: Option<Tensor>,
     pub uniform_loss: f64,
 }
 
 impl Batch {
-    pub fn new(rows: &[Row], indices: &[usize], device: &Device) -> candle_core::Result<Self> {
+    pub fn new(
+        rows: &[Row],
+        indices: &[usize],
+        device: &Device,
+        uses_piece_counts: bool,
+    ) -> candle_core::Result<Self> {
         let size = indices.len();
         let mut positions = Vec::with_capacity(size * SQUARES * INPUTS);
         for &i in indices {
@@ -146,13 +151,17 @@ impl Batch {
             mask: Tensor::from_vec(mask, shape, device)?,
             policy: Tensor::from_vec(policy, shape, device)?,
             value: Tensor::from_vec(value, size, device)?,
-            piece_features: feature_tensor(
-                &indices
-                    .iter()
-                    .map(|&i| rows[i].piece_features)
-                    .collect::<Vec<_>>(),
-                device,
-            )?,
+            piece_features: if uses_piece_counts {
+                Some(feature_tensor(
+                    &indices
+                        .iter()
+                        .map(|&i| rows[i].piece_features)
+                        .collect::<Vec<_>>(),
+                    device,
+                )?)
+            } else {
+                None
+            },
             uniform_loss,
         })
     }

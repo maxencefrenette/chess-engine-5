@@ -4,10 +4,7 @@ use candle_core::{DType, Device, Tensor, safetensors};
 use candle_nn::VarBuilder;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    ModelConfig, Net,
-    piece_value::{CpuPieceValue, PREFIX, PieceValue},
-};
+use crate::{ModelConfig, Net};
 
 const CONFIG_FILE: &str = "config.toml";
 const METRICS_FILE: &str = "metrics.toml";
@@ -44,31 +41,7 @@ impl Checkpoint {
         })
     }
 
-    fn value_tensors(&self, device: &Device) -> candle_core::Result<HashMap<String, Tensor>> {
-        ["weight", "bias"]
-            .into_iter()
-            .map(|field| {
-                let name = format!("{PREFIX}.{field}");
-                let tensor = self
-                    .tensors
-                    .get(&name)
-                    .ok_or_else(|| candle_core::Error::Msg(format!("missing tensor {name}")))?;
-                Ok((name, tensor.to_device(device)?))
-            })
-            .collect()
-    }
-
-    pub fn value(&self) -> candle_core::Result<CpuPieceValue> {
-        let device = &Device::Cpu;
-        PieceValue::new(VarBuilder::from_tensors(
-            self.value_tensors(device)?,
-            DType::F32,
-            device,
-        ))?
-        .into_cpu()
-    }
-
-    pub fn into_policy(self, device: &Device) -> candle_core::Result<Net> {
+    pub fn into_model(self, device: &Device) -> candle_core::Result<Net> {
         Net::new(
             VarBuilder::from_tensors(self.tensors, DType::F32, device),
             self.model,

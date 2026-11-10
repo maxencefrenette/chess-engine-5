@@ -4,7 +4,10 @@ use std::{
 };
 
 use chess_config::DeviceConfig;
-use chess_network::inference::{InferenceModel, Prediction};
+use chess_network::{
+    inference::{InferenceModel, Prediction},
+    value::ValueConfig,
+};
 
 use crate::{
     chess::{Color, Game},
@@ -22,6 +25,10 @@ impl ModelEvaluator {
             model: InferenceModel::load(model_dir, device)?,
             model_dir: model_dir.into(),
         })
+    }
+
+    pub(crate) fn value_config(&self) -> ValueConfig {
+        self.model.value_config()
     }
 
     pub(crate) fn evaluate(&self, batch: &[(usize, Leaf)]) -> io::Result<Vec<Prediction>> {
