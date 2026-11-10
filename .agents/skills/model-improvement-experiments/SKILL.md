@@ -13,7 +13,7 @@ Run experiments sequentially. Finish each experiment’s evaluation and promotio
 
 ## Training budget
 
-Keep the budget fixed at 1,200 seconds. Use the training budget reported by `mise run train`. It adds timed runtime to 0.1 times the estimated generation time for the selected training positions, charging each position once across all epochs and excluding held-out generation. The timed runtime excludes data loading and setup and includes held-out evaluation and checkpoint saving.
+Keep the budget fixed at 1,800 seconds. Use the training budget reported by `mise run train`. It adds timed runtime to 0.3 times the estimated generation time for the selected training positions, charging each position once across all epochs and excluding held-out generation. The timed runtime excludes data loading and setup and includes held-out evaluation and checkpoint saving.
 
 Use a dataset with generation timings. Set `train_positions`, then calibrate `optimizer_steps` to fit the remaining budget. Rerun candidates whose reported budget differs from the target by more than 5%, adjusting the step count. Keep the same target after promoting a candidate.
 

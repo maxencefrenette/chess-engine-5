@@ -9,7 +9,7 @@ use serde_json::json;
 
 use crate::data::{self, Batch, Result};
 
-const GENERATION_BUDGET_WEIGHT: f64 = 0.1;
+const GENERATION_BUDGET_WEIGHT: f64 = 0.3;
 
 #[chess_config::toml_config]
 pub struct Config {
