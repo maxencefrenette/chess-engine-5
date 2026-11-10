@@ -12,8 +12,8 @@ use serde_json::json;
 
 use crate::{
     chess::{Color, Game, Outcome},
-    hybrid::Hybrid,
     mcts::Search,
+    model_evaluator::ModelEvaluator,
     settings::Settings,
 };
 
@@ -80,7 +80,7 @@ impl ActiveGame {
 }
 
 fn play_batch(
-    model: &Hybrid,
+    model: &ModelEvaluator,
     settings: &Settings,
     config: &Config,
     ids: std::ops::Range<usize>,
@@ -127,7 +127,7 @@ fn play_batch(
     Ok(completed)
 }
 
-pub fn generate(config: &Config, model: &Hybrid, settings: &Settings) -> Result<PathBuf> {
+pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) -> Result<PathBuf> {
     if !config.temperature.is_finite() || config.temperature < 0.0 {
         return Err("self-play temperature must be finite and nonnegative".into());
     }

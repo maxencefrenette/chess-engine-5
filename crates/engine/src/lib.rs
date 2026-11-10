@@ -5,4 +5,4 @@ pub mod self_play;
 pub mod settings;
 mod sprt;
 
-pub mod hybrid;
+pub mod model_evaluator;

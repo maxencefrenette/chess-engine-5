@@ -20,14 +20,14 @@ pub(crate) struct Evaluation {
     pub priors: Vec<f32>,
 }
 
-pub struct Hybrid {
+pub struct ModelEvaluator {
     policy: Net,
     value: CpuPieceValue,
     device: Device,
     pub(crate) model_dir: PathBuf,
 }
 
-impl Hybrid {
+impl ModelEvaluator {
     pub fn load(model_dir: &Path, device: DeviceConfig) -> io::Result<Self> {
         let device = device.try_into().map_err(io::Error::other)?;
         let checkpoint = Checkpoint::load(model_dir, &device)?;
@@ -117,7 +117,7 @@ fn normalize(logits: &mut [f32]) {
     }
 }
 
-impl Hybrid {
+impl ModelEvaluator {
     pub(crate) fn evaluate(&self, batch: &[(usize, Leaf)]) -> io::Result<Vec<Evaluation>> {
         if batch.is_empty() {
             return Ok(Vec::new());
@@ -131,7 +131,7 @@ impl Hybrid {
             .map(|(((_, leaf), mut priors), value)| {
                 priors.truncate(leaf.moves.len());
                 if !value.is_finite() || priors.iter().any(|logit| !logit.is_finite()) {
-                    return Err(io::Error::other("non-finite hybrid prediction"));
+                    return Err(io::Error::other("non-finite model prediction"));
                 }
                 normalize(&mut priors);
                 Ok(Evaluation { value, priors })

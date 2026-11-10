@@ -3,8 +3,8 @@ use std::{env, path::Path, process::ExitCode};
 use chess_config::{DeviceConfig, TomlConfig};
 use chess_engine::{
     chess::Game,
-    hybrid::Hybrid,
     matches::{self, Mode, Options},
+    model_evaluator::ModelEvaluator,
     self_play,
     settings::Settings,
 };
@@ -34,8 +34,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .ok_or(USAGE)?;
         let options = Options::load("config/eval-model.toml", args)?;
         let settings = Settings::load()?;
-        let baseline = Hybrid::load(&options.baseline_dir, options.device)?;
-        let candidate = Hybrid::load(Path::new(&candidate_dir), options.device)?;
+        let baseline = ModelEvaluator::load(&options.baseline_dir, options.device)?;
+        let candidate = ModelEvaluator::load(Path::new(&candidate_dir), options.device)?;
         println!(
             "baseline={} candidate={} device={}",
             options.baseline_dir.display(),
@@ -51,7 +51,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if command == "self-play" && device == DeviceConfig::Cpu {
         let config = self_play::Config::load("config/datagen.toml", args)?;
-        let model = Hybrid::load(&config.model, config.device)?;
+        let model = ModelEvaluator::load(&config.model, config.device)?;
         let run = self_play::generate(&config, &model, &Settings::load()?)?;
         println!("{}", run.display());
         return Ok(());
@@ -75,7 +75,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{outcome:?}");
                 return Ok(());
             }
-            let model = Hybrid::load(Path::new(&model), device)?;
+            let model = ModelEvaluator::load(Path::new(&model), device)?;
             let mut moves = model.search(&game, visits, Settings::load()?.exploration)?;
             moves.sort_by_key(|entry| std::cmp::Reverse(entry.visits));
             for entry in moves {

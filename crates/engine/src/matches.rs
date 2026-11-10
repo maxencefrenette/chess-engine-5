@@ -11,8 +11,8 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::{
     chess::{Color, Game, Outcome},
-    hybrid::Hybrid,
     mcts::{Leaf, Search},
+    model_evaluator::ModelEvaluator,
     settings::Settings,
     sprt,
 };
@@ -94,7 +94,7 @@ fn observed_elo([wins, draws, losses]: [u64; 3]) -> f64 {
 }
 
 fn time_matched_visits(
-    players: [&Hybrid; 2],
+    players: [&ModelEvaluator; 2],
     batch_size: usize,
     baseline_visits: NonZeroU32,
 ) -> io::Result<[NonZeroU32; 2]> {
@@ -149,7 +149,7 @@ fn time_matched_visits(
 pub fn run(
     options: Options,
     mode: Mode,
-    players: [&Hybrid; 2],
+    players: [&ModelEvaluator; 2],
     settings: &Settings,
 ) -> io::Result<()> {
     if options.batch == 0 || options.max_pairs == 0 || options.max_pairs > u64::MAX / 2 {
@@ -288,12 +288,14 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../config/eval-model.toml"
         ))?;
-        Hybrid::load(&options.baseline_dir, chess_config::DeviceConfig::Cpu).map_err(|error| {
-            format!(
-                "loading baseline {}: {error}",
-                options.baseline_dir.display()
-            )
-        })?;
+        ModelEvaluator::load(&options.baseline_dir, chess_config::DeviceConfig::Cpu).map_err(
+            |error| {
+                format!(
+                    "loading baseline {}: {error}",
+                    options.baseline_dir.display()
+                )
+            },
+        )?;
         Ok(())
     }
 }
