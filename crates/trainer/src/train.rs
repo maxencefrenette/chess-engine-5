@@ -1,4 +1,4 @@
-use std::{num::NonZeroUsize, path::PathBuf, time::Instant};
+use std::{fmt::Write, fs, num::NonZeroUsize, path::PathBuf, time::Instant};
 
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap, loss, ops::log_softmax};
@@ -10,6 +10,17 @@ use serde_json::json;
 use crate::data::{self, Batch, Result};
 
 const GENERATION_BUDGET_WEIGHT: f64 = 0.3;
+const METRICS_INTERVAL: usize = 10;
+
+struct TrainingSample {
+    policy: f64,
+    wdl: f64,
+    lr: f64,
+    elapsed: f64,
+    step: usize,
+    positions: usize,
+    epoch: usize,
+}
 
 #[chess_config::toml_config]
 #[derive(serde::Serialize)]
@@ -147,10 +158,14 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     let mut indices: Vec<_> = (0..data.train.len()).collect();
     let steps_per_epoch = indices.len().div_ceil(batch_size);
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut history = Vec::with_capacity(planned_steps.div_ceil(METRICS_INTERVAL));
     device.synchronize()?;
     let training_started = Instant::now();
     let setup_seconds = training_started.duration_since(setup_started).as_secs_f64();
     let mut optimizer_steps = 0usize;
+    let mut positions_seen = 0;
+    let mut window_positions = 0;
+    let mut window_totals = [0.; 2];
     for epoch in 1..=planned_steps.div_ceil(steps_per_epoch) {
         let epoch_started = Instant::now();
         indices.shuffle(&mut rng);
@@ -163,14 +178,37 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
             let batch = Batch::new(&data.train, chunk, device)?;
             let [policy, value] = losses(&net, &playing_value, &batch)?;
             let objective = (&policy + &value)?;
-            optimizer.set_learning_rate(
-                adamw.learning_rate * adamw.schedule.multiplier(optimizer_steps, planned_steps),
-            );
+            let lr =
+                adamw.learning_rate * adamw.schedule.multiplier(optimizer_steps, planned_steps);
+            optimizer.set_learning_rate(lr);
             optimizer.backward_step(&objective)?;
             optimizer_steps += 1;
             epoch_positions += chunk.len();
-            for (total, loss) in totals.iter_mut().zip([policy, value]) {
-                *total += f64::from(loss.to_scalar::<f32>()?) * chunk.len() as f64;
+            positions_seen += chunk.len();
+            window_positions += chunk.len();
+            for ((total, window_total), loss) in totals
+                .iter_mut()
+                .zip(&mut window_totals)
+                .zip([policy, value])
+            {
+                let weighted = f64::from(loss.to_scalar::<f32>()?) * chunk.len() as f64;
+                *total += weighted;
+                *window_total += weighted;
+            }
+            if optimizer_steps.is_multiple_of(METRICS_INTERVAL) || optimizer_steps == planned_steps
+            {
+                let [policy, wdl] = window_totals.map(|total| total / window_positions as f64);
+                history.push(TrainingSample {
+                    policy,
+                    wdl,
+                    lr,
+                    elapsed: training_started.elapsed().as_secs_f64(),
+                    step: optimizer_steps,
+                    positions: positions_seen,
+                    epoch,
+                });
+                window_totals = [0.; 2];
+                window_positions = 0;
             }
         }
         let [policy, value] = totals.map(|loss| loss / epoch_positions as f64);
@@ -261,6 +299,25 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         metrics["estimated_generation_seconds"] = json!(generation);
     }
     checkpoint::save(output_dir, tensors, &config, metrics)?;
+    let mut csv =
+        String::from("loss,loss/policy,loss/wdl,lr,elapsed_time,step,position_seen,epoch\n");
+    for TrainingSample {
+        policy,
+        wdl,
+        lr,
+        elapsed,
+        step,
+        positions,
+        epoch,
+    } in history
+    {
+        let loss = policy + wdl;
+        writeln!(
+            csv,
+            "{loss},{policy},{wdl},{lr},{elapsed},{step},{positions},{epoch}"
+        )?;
+    }
+    fs::write(output_dir.join("training.csv"), csv)?;
     let timed_seconds = training_started.elapsed().as_secs_f64();
     println!("saved {}", output_dir.display());
     println!(
