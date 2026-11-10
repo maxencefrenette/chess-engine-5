@@ -356,7 +356,7 @@ dependencies = [
  "chess-config",
  "chess-data",
  "serde",
- "serde_json",
+ "toml",
 ]
 
 [[package]]

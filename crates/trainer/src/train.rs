@@ -12,6 +12,7 @@ use crate::data::{self, Batch, Result};
 const GENERATION_BUDGET_WEIGHT: f64 = 0.3;
 
 #[chess_config::toml_config]
+#[derive(serde::Serialize)]
 pub struct Config {
     dataset: PathBuf,
     output_dir: PathBuf,
@@ -88,17 +89,17 @@ fn losses(
 
 pub fn run(config: Config, device: &Device) -> Result<()> {
     let Config {
-        dataset,
-        output_dir,
+        ref dataset,
+        ref output_dir,
         train_positions,
         optimizer_steps: planned_steps,
         batch_size,
-        optimizer: optimizer_config,
+        ref optimizer,
         seed,
         model,
         ..
     } = config;
-    let OptimizerConfig::Adamw(adamw) = &optimizer_config;
+    let OptimizerConfig::Adamw(adamw) = optimizer;
     let (planned_steps, batch_size) = (planned_steps.get(), batch_size.get());
     if !adamw.learning_rate.is_finite() || adamw.learning_rate <= 0. {
         return Err("training optimizer.learning_rate must be positive and finite".into());
@@ -115,7 +116,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         return Err(format!("output already exists: {}", output_dir.display()).into());
     }
     let setup_started = Instant::now();
-    let data = data::load(&dataset, seed, train_positions.get())
+    let data = data::load(dataset, seed, train_positions.get())
         .map_err(|error| format!("dataset {}: {error}", dataset.display()))?;
     println!(
         "train: {} games / {} positions; test: {} games / {} positions",
@@ -237,36 +238,29 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         data.train.len()
     );
 
-    let config = checkpoint::config(
-        model,
-        json!({
-                "source": dataset,
-                "seed": seed,
-                "completed_epochs": completed_epochs,
-                "partial_epoch_positions": partial_epoch_positions,
-                "batch_size": batch_size,
-                "optimizer": optimizer_config,
-                "optimizer_steps": optimizer_steps,
-                "setup_seconds": setup_seconds,
-                "training_seconds": training_seconds,
-                "evaluation_seconds": evaluation_seconds,
-                "device": if device.is_cuda() { "cuda" } else { "cpu" },
-                "dtype": "f32",
-                "layer_norm_backward": true,
-                "train_games": data.train_games,
-                "train_positions": data.train.len(),
-                "requested_train_positions": train_positions.get(),
-                "estimated_generation_seconds": data.estimated_generation_seconds,
-                "test_game_ids": data.test_ids,
-                "test_positions": data.test.len(),
-                "test_policy_loss": policy,
-                "uniform_policy_loss": uniform,
-                "beats_uniform_policy": beats_uniform,
-                "test_wdl_loss": value,
-                "prior_wdl_loss": value_baseline,
-        }),
-    );
-    checkpoint::save(&output_dir, tensors, &config)?;
+    let mut metrics = json!({
+        "completed_epochs": completed_epochs,
+        "partial_epoch_positions": partial_epoch_positions,
+        "optimizer_steps": optimizer_steps,
+        "setup_seconds": setup_seconds,
+        "training_seconds": training_seconds,
+        "evaluation_seconds": evaluation_seconds,
+        "dtype": "f32",
+        "layer_norm_backward": true,
+        "train_games": data.train_games,
+        "train_positions": data.train.len(),
+        "test_game_ids": data.test_ids,
+        "test_positions": data.test.len(),
+        "test_policy_loss": policy,
+        "uniform_policy_loss": uniform,
+        "beats_uniform_policy": beats_uniform,
+        "test_wdl_loss": value,
+        "prior_wdl_loss": value_baseline,
+    });
+    if let Some(generation) = data.estimated_generation_seconds {
+        metrics["estimated_generation_seconds"] = json!(generation);
+    }
+    checkpoint::save(output_dir, tensors, &config, metrics)?;
     let timed_seconds = training_started.elapsed().as_secs_f64();
     println!("saved {}", output_dir.display());
     println!(

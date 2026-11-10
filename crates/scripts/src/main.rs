@@ -11,7 +11,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     };
 
     let candidate = fs::canonicalize(candidate)?;
-    for name in ["config.json", "weights.safetensors"] {
+    for name in ["config.toml", "weights.safetensors"] {
         if !candidate.join(name).is_file() {
             return Err(format!("checkpoint is missing {}", candidate.join(name).display()).into());
         }

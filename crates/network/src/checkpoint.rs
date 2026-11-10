@@ -2,37 +2,25 @@ use std::{collections::HashMap, fs, io, path::Path};
 
 use candle_core::{DType, Device, Tensor, safetensors};
 use candle_nn::VarBuilder;
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
 
 use crate::{
-    INPUTS, ModelConfig, Net,
+    ModelConfig, Net,
     piece_value::{CpuPieceValue, PREFIX, PieceValue},
 };
 
-const CONFIG_FILE: &str = "config.json";
+const CONFIG_FILE: &str = "config.toml";
+const METRICS_FILE: &str = "metrics.toml";
 const WEIGHTS_FILE: &str = "weights.safetensors";
 
-fn format_fields() -> [(&'static str, Value); 6] {
-    [
-        ("format_version", json!(1)),
-        ("architecture", json!("lc0_style_smolgen_v1")),
-        ("position_encoding", json!("packed_board_planes_v1")),
-        ("move_encoding", json!("ce5_packed_move_v1")),
-        ("value_model", json!("side_relative_piece_counts_v1")),
-        ("input_channels", json!(INPUTS)),
-    ]
+#[derive(Deserialize, Serialize)]
+struct Config<T> {
+    training: T,
 }
 
-pub fn config(model: ModelConfig, training: Value) -> Value {
-    let mut config = json!({
-        "value_order": ["loss", "draw", "win"],
-        "training": training,
-        "model": model,
-    });
-    for (key, expected) in format_fields() {
-        config[key] = expected;
-    }
-    config
+#[derive(Deserialize)]
+struct ModelSettings {
+    model: ModelConfig,
 }
 
 pub struct Checkpoint {
@@ -43,27 +31,17 @@ pub struct Checkpoint {
 impl Checkpoint {
     pub fn load(directory: &Path, device: &Device) -> io::Result<Self> {
         let path = directory.join(CONFIG_FILE);
-        let config: Value = serde_json::from_slice(&fs::read(&path).map_err(|error| {
+        let text = fs::read_to_string(&path).map_err(|error| {
             io::Error::new(error.kind(), format!("{}: {error}", path.display()))
-        })?)?;
-        for (key, expected) in format_fields() {
-            if config[key] != expected {
-                return Err(io::Error::other(format!(
-                    "unsupported checkpoint {key}: {}",
-                    config[key]
-                )));
-            }
-        }
-        if config["value_order"] != json!(["loss", "draw", "win"]) {
-            return Err(io::Error::other("unsupported checkpoint value order"));
-        }
-        let model = config
-            .get("model")
-            .ok_or_else(|| io::Error::other("checkpoint is missing its model section"))?;
-        let model = serde_json::from_value(model.clone())?;
+        })?;
+        let config: Config<ModelSettings> = toml::from_str(&text)
+            .map_err(|error| io::Error::other(format!("{}: {error}", path.display())))?;
         let tensors =
             safetensors::load(directory.join(WEIGHTS_FILE), device).map_err(io::Error::other)?;
-        Ok(Self { tensors, model })
+        Ok(Self {
+            tensors,
+            model: config.training.model,
+        })
     }
 
     fn value_tensors(&self, device: &Device) -> candle_core::Result<HashMap<String, Tensor>> {
@@ -99,8 +77,16 @@ impl Checkpoint {
 }
 
 /// Save a policy and its playing value model together. Publish config last.
-pub fn save(directory: &Path, tensors: HashMap<String, Tensor>, config: &Value) -> io::Result<()> {
+pub fn save(
+    directory: &Path,
+    tensors: HashMap<String, Tensor>,
+    training: impl Serialize,
+    metrics: impl Serialize,
+) -> io::Result<()> {
+    let config = toml::to_string_pretty(&Config { training }).map_err(io::Error::other)?;
+    let metrics = toml::to_string_pretty(&metrics).map_err(io::Error::other)?;
     fs::create_dir(directory)?;
     safetensors::save(&tensors, directory.join(WEIGHTS_FILE)).map_err(io::Error::other)?;
-    fs::write(directory.join(CONFIG_FILE), format!("{config:#}\n"))
+    fs::write(directory.join(METRICS_FILE), metrics)?;
+    fs::write(directory.join(CONFIG_FILE), config)
 }
