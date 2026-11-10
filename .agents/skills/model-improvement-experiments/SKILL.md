@@ -11,9 +11,11 @@ This skill describes how to run and evaluate experiments that improve the model 
 
 Run experiments sequentially. Finish each experiment’s evaluation and promotion decision before training the next candidate. Use the current baseline’s architecture and training recipe as the starting settings for each experiment.
 
-## Time budget
+## Training budget
 
-Every training run should aim to take 5 minutes. Use the timed runtime printed by `mise run train`, which starts after data loading and setup and includes held-out evaluation and checkpoint saving. Rerun training outside the 285–315 second window with an adjusted step count. When a new configuration changes the time per step, calibrate its step count to finish in about 5 minutes.
+Keep the budget fixed at 1,388.53 seconds, the cost of the one-layer baseline under this accounting. Use the training budget reported by `mise run train`. It adds timed runtime to 0.1 times the estimated generation time for the selected training positions, charging each position once across all epochs and excluding held-out generation. The timed runtime excludes data loading and setup and includes held-out evaluation and checkpoint saving.
+
+Use a dataset with generation timings. Set `train_positions`, then calibrate `optimizer_steps` to fit the remaining budget. Rerun candidates whose reported budget differs from the target by more than 5%, adjusting the step count. Keep the same target after promoting a candidate.
 
 ## Sweeps
 
@@ -27,7 +29,7 @@ Use `gainer` for experiments that aim to improve playing strength under a fixed 
 
 * Model architecture improvements
 * Model training recipe improvements
-* Lower training cost, the model should be trained for more steps in the same wall-clock time budget, which should result in an improvement.
+* Lower training cost, which lets the model take more optimizer steps within the same training budget.
 * Lower inference cost, the SPRT match will automatically assign more visits to the faster candidate, which should result in increased playing strength.
 
 ```sh
@@ -57,6 +59,7 @@ After finishing an experiment, regardless of if it's successful or not, write an
 
 An experiment report must include the following:
 * The 1-sentence goal of the experiment
+* Timed training runtime, estimated training-data generation time, and weighted total
 * [optional] svg charts, embedded in the README.md
 
 If a baseline match was run, include:

@@ -9,6 +9,8 @@ use serde_json::json;
 
 use crate::data::{self, Batch, Result};
 
+const GENERATION_BUDGET_WEIGHT: f64 = 0.1;
+
 #[chess_config::toml_config]
 pub struct Config {
     dataset: PathBuf,
@@ -271,12 +273,12 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         "runtime: {timed_seconds:.2}s timed (training, held-out evaluation, and save); {setup_seconds:.2}s setup excluded; {optimizer_steps} optimizer steps ({training_seconds:.2}s training, {evaluation_seconds:.2}s held-out evaluation)"
     );
     if let Some(generation) = data.estimated_generation_seconds {
+        let spent = timed_seconds + GENERATION_BUDGET_WEIGHT * generation;
         println!(
-            "data budget: {generation:.2}s estimated generation, {:.2}s including timed training",
-            generation + timed_seconds
+            "training budget: {spent:.2}s spent ({timed_seconds:.2}s timed runtime + {GENERATION_BUDGET_WEIGHT} × {generation:.2}s estimated generation)"
         );
     } else {
-        println!("data budget: generation time unavailable for this dataset");
+        println!("training budget: unavailable because the dataset is missing generation timings");
     }
     Ok(())
 }
