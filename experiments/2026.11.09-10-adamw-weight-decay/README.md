@@ -1,13 +1,10 @@
-# Adamw weight decay
+# AdamW weight decay
 
-Test whether AdamW weight decay 0 or 0.05 improves the current baseline under the same training-time budget.
-
-Starting baseline `/data/chess/chess-engine-5/models/training-recipe-experiments.VioD2w/one-layer`. All candidates started from fresh weights and used the baseline's one-layer architecture, 5,000-game dataset, and held-out split.
-Baseline optimizer `{"beta1": 0.9, "beta2": 0.999, "eps": 1e-08, "kind": "adamw", "learning_rate": 0.001, "schedule": {"mode": "constant"}, "weight_decay": 0.01}` and batch size 128.
+Test whether AdamW weight decay 0 or 0.05 improves held-out prediction under the same training-time budget.
 
 | Variant | Timed seconds | Optimizer steps | Policy loss | WDL loss |
 |---|---:|---:|---:|---:|
-| Control | 295.29 | 20,429 | 2.394013 | 0.857868 |
+| 0.01 (control) | 295.29 | 20,429 | 2.394013 | 0.857868 |
 | 0 | 309.85 | 20,429 | 2.394775 | 0.856886 |
 | 0.05 | 309.45 | 20,429 | 2.393616 | 0.862382 |
 

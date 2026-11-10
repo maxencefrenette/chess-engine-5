@@ -2,7 +2,7 @@
 
 Test whether widening the policy transformer from 64 to 96 channels improves held-out prediction under the same wall-clock budget.
 
-Training override `model.width=96`. All runs used dataset `/data/chess/chess-engine-5/training-data/v2/1794199969642733611-305557`, the same 4,500/500 game split, seed 42, batch size 128, and learning rate 0.001. Step counts were calibrated separately for the 285–315 second training window.
+Training override `model.width=96`. Step counts were calibrated for the same training-time window.
 
 | Run | Timed seconds | Optimizer steps | Held-out policy loss | Held-out WDL loss |
 |---|---:|---:|---:|---:|

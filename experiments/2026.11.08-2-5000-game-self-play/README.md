@@ -12,16 +12,14 @@ Generator checkpoint `/data/chess/chess-engine-5/models/smolgen-v1-1000games-pol
 
 ## Training
 
-One epoch with the current model architecture, learning rate 0.001, batch size 128, and seed 42. The game-level split used 4,500 training and 500 held-out games.
+Trained for one epoch on the new dataset.
 Timed runtime was 145.35 seconds for 5,904 optimizer steps. Held-out policy loss was 2.4139 and WDL loss was 0.8692.
 Candidate checkpoint `/data/chess/chess-engine-5/models/datagen-5000-experiment.SUaj4m/checkpoint`.
 
-## Baseline match
-
-Ran the gainer SPRT against `/data/chess/chess-engine-5/models/smolgen-v1-1000games-policy-piece-wdl-seed42` with bounds of 0 and 20 Elo. The inference benchmark assigned 800 visits per move to the baseline and 801 to the candidate.
+## Match
 
 - W/D/L 62/29/15
 - Observed Elo +165.5
 - SPRT verdict Passed
 
-The candidate became the new evaluation baseline. The experiment changed both dataset size and the generator. The earlier 1,000-game dataset used a material evaluator with uniform priors, so the match measures the combined recipe change.
+The candidate was promoted. The experiment changed both dataset size and the generator. The earlier 1,000-game dataset used a material evaluator with uniform priors, so the match measures the combined recipe change.

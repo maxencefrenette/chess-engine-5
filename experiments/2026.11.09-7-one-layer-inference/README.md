@@ -6,9 +6,9 @@ Across three paired benchmarks at 256 positions, the median was 1.572 ms for one
 
 Logs and config snapshots are in `/data/chess/chess-engine-5/models/training-recipe-experiments.VioD2w`. Source revision `946aec0` plus the local schedule change.
 
-## Baseline match
+## Match
 
-Gainer SPRT against `/data/chess/chess-engine-5/models/training-recipe-experiments.VioD2w/five-minute-control`, with a cap of 256 color-swapped pairs. The inference benchmark assigned 800 visits per move to the baseline and 1,251 to the candidate.
+The inference benchmark assigned 1,251 visits per move to the one-layer model and 800 to the two-layer model.
 
 - W/D/L 188/95/139
 - Observed Elo +40.5
