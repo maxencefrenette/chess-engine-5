@@ -3,87 +3,39 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use candle_core::{Device, Tensor};
 use chess_config::DeviceConfig;
-use chess_network::{
-    INPUTS, Net, SQUARES, checkpoint::Checkpoint, encode_position, move_indices,
-    piece_value::CpuPieceValue,
-};
+use chess_network::inference::{InferenceModel, Prediction};
 
 use crate::{
     chess::{Color, Game},
     mcts::{Leaf, MoveVisits, Search},
 };
 
-pub(crate) struct Evaluation {
-    pub value: f32,
-    pub priors: Vec<f32>,
-}
-
 pub struct ModelEvaluator {
-    policy: Net,
-    value: CpuPieceValue,
-    device: Device,
+    model: InferenceModel,
     pub(crate) model_dir: PathBuf,
 }
 
 impl ModelEvaluator {
     pub fn load(model_dir: &Path, device: DeviceConfig) -> io::Result<Self> {
-        let device = device.try_into().map_err(io::Error::other)?;
-        let checkpoint = Checkpoint::load(model_dir, &device)?;
-        let value = checkpoint.value().map_err(io::Error::other)?;
-        let policy = checkpoint.into_policy(&device).map_err(io::Error::other)?;
         Ok(Self {
-            policy,
-            value,
-            device,
+            model: InferenceModel::load(model_dir, device)?,
             model_dir: model_dir.into(),
         })
     }
 
-    fn logits(
-        &self,
-        batch: &[(usize, Leaf)],
-        values: &mut Vec<f32>,
-    ) -> candle_core::Result<Vec<Vec<f32>>> {
-        let size = batch.len();
-        let width = batch
-            .iter()
-            .map(|(_, leaf)| leaf.moves.len())
-            .max()
-            .unwrap();
-        let mut positions = Vec::with_capacity(size * SQUARES * INPUTS);
-        let mut moves = vec![0; size * width];
-        let mut promotions = moves.clone();
-        let mut promotes = vec![0.; size * width];
-        for (i, (_, leaf)) in batch.iter().enumerate() {
-            let snapshot = leaf.game.snapshot(&leaf.moves);
-            let black = leaf.game.turn() == Color::Black;
-            encode_position(
-                &mut positions,
-                &snapshot.board,
-                black,
-                snapshot.castling,
-                snapshot.ep_square,
-                snapshot.halfmove_clock,
-                snapshot.repetitions,
-            )
-            .expect("engine snapshot has valid pieces");
-            values.push(self.value.evaluate(&snapshot.board, black));
-            for (j, mv) in leaf.moves.iter().enumerate() {
-                let k = i * width + j;
-                (moves[k], promotions[k], promotes[k]) = move_indices(mv.packed());
-            }
-        }
-        let shape = (size, width);
-        self.policy
-            .policy(
-                &Tensor::from_vec(positions, (size, SQUARES, INPUTS), &self.device)?,
-                &Tensor::from_vec(moves, shape, &self.device)?,
-                &Tensor::from_vec(promotions, shape, &self.device)?,
-                &Tensor::from_vec(promotes, shape, &self.device)?,
-            )?
-            .to_vec2()
+    pub(crate) fn evaluate(&self, batch: &[(usize, Leaf)]) -> io::Result<Vec<Prediction>> {
+        self.model.evaluate(
+            batch.iter().map(|(_, leaf)| {
+                (
+                    leaf.game.snapshot(&leaf.moves),
+                    leaf.game.turn() == Color::Black,
+                )
+            }),
+            batch
+                .iter()
+                .map(|(_, leaf)| leaf.moves.iter().map(|mv| mv.packed())),
+        )
     }
 
     pub fn search(
@@ -103,39 +55,5 @@ impl ModelEvaluator {
             search.evaluate(leaf, result.value, &result.priors);
         }
         Ok(search.visits().collect())
-    }
-}
-
-fn normalize(logits: &mut [f32]) {
-    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    for logit in logits.iter_mut() {
-        *logit = (*logit - max).exp();
-    }
-    let sum = logits.iter().sum::<f32>();
-    for logit in logits {
-        *logit /= sum;
-    }
-}
-
-impl ModelEvaluator {
-    pub(crate) fn evaluate(&self, batch: &[(usize, Leaf)]) -> io::Result<Vec<Evaluation>> {
-        if batch.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut values = Vec::with_capacity(batch.len());
-        let logits = self.logits(batch, &mut values).map_err(io::Error::other)?;
-        batch
-            .iter()
-            .zip(logits)
-            .zip(values)
-            .map(|(((_, leaf), mut priors), value)| {
-                priors.truncate(leaf.moves.len());
-                if !value.is_finite() || priors.iter().any(|logit| !logit.is_finite()) {
-                    return Err(io::Error::other("non-finite model prediction"));
-                }
-                normalize(&mut priors);
-                Ok(Evaluation { value, priors })
-            })
-            .collect()
     }
 }

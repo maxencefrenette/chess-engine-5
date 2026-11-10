@@ -75,12 +75,7 @@ fn losses(
     playing_value: &PieceValue,
     batch: &Batch,
 ) -> candle_core::Result<[Tensor; 2]> {
-    let policy = net.policy(
-        &batch.position,
-        &batch.move_index,
-        &batch.promotion_index,
-        &batch.promotes,
-    )?;
+    let policy = batch.inputs.logits(net)?;
     let log_probs = log_softmax(&(&policy + &batch.mask)?, 1)?;
     let policy = (&log_probs * &batch.policy)?.sum(1)?.neg()?.mean_all()?;
     Ok([

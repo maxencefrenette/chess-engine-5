@@ -8,6 +8,7 @@ cuda = ["candle-core/cuda", "candle-nn/cuda"]
 
 [dependencies]
 chess-config = { path = "../config" }
+chess-data = { path = "../data" }
 candle-core.workspace = true
 candle-nn.workspace = true
 serde_json = "1"

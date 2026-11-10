@@ -7,8 +7,9 @@ use rand::{SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha8Rng;
 
 use chess_network::{
-    INPUTS, SQUARES, encode_position, move_indices,
+    INPUTS, SQUARES, encode_position,
     piece_value::{PIECE_FEATURES, feature_tensor, piece_features},
+    policy_inputs::PolicyInputs,
 };
 
 pub struct Row {
@@ -118,10 +119,7 @@ fn encode_row(row: chess_data::Row) -> Result<Row> {
 }
 
 pub struct Batch {
-    pub position: Tensor,
-    pub move_index: Tensor,
-    pub promotion_index: Tensor,
-    pub promotes: Tensor,
+    pub inputs: PolicyInputs,
     pub mask: Tensor,
     pub policy: Tensor,
     pub value: Tensor,
@@ -132,33 +130,32 @@ pub struct Batch {
 impl Batch {
     pub fn new(rows: &[Row], indices: &[usize], device: &Device) -> candle_core::Result<Self> {
         let size = indices.len();
-        let width = indices.iter().map(|&i| rows[i].moves.len()).max().unwrap();
         let mut positions = Vec::with_capacity(size * SQUARES * INPUTS);
-        let mut move_index = vec![0u32; size * width];
-        let mut promotion_index = move_index.clone();
-        let mut promotes = vec![0f32; size * width];
+        for &i in indices {
+            positions.extend_from_slice(&rows[i].features);
+        }
+        let moves = indices
+            .iter()
+            .map(|&i| rows[i].moves.iter().map(|&(mv, _)| mv));
+        let inputs = PolicyInputs::new(positions, moves, device)?;
+        let width = inputs.move_width();
         let mut mask = vec![-1e9_f32; size * width];
         let mut policy = vec![0f32; size * width];
         let mut value = Vec::with_capacity(size);
         let mut uniform_loss = 0.;
         for (i, &row) in indices.iter().enumerate() {
             let row = &rows[row];
-            positions.extend_from_slice(&row.features);
             value.push(row.value);
             uniform_loss += (row.moves.len() as f64).ln();
-            for (j, &(mv, visits)) in row.moves.iter().enumerate() {
+            for (j, &(_, visits)) in row.moves.iter().enumerate() {
                 let index = i * width + j;
-                (move_index[index], promotion_index[index], promotes[index]) = move_indices(mv);
                 mask[index] = 0.;
                 policy[index] = f32::from(visits) / row.total_visits;
             }
         }
         let shape = (size, width);
         Ok(Self {
-            position: Tensor::from_vec(positions, (size, SQUARES, INPUTS), device)?,
-            move_index: Tensor::from_vec(move_index, shape, device)?,
-            promotion_index: Tensor::from_vec(promotion_index, shape, device)?,
-            promotes: Tensor::from_vec(promotes, shape, device)?,
+            inputs,
             mask: Tensor::from_vec(mask, shape, device)?,
             policy: Tensor::from_vec(policy, shape, device)?,
             value: Tensor::from_vec(value, size, device)?,

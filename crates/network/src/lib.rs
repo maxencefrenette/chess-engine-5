@@ -1,5 +1,7 @@
 pub mod checkpoint;
+pub mod inference;
 pub mod piece_value;
+pub mod policy_inputs;
 
 use candle_core::{Result, Tensor};
 use candle_nn::{

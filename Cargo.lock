@@ -354,6 +354,7 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "chess-config",
+ "chess-data",
  "serde",
  "serde_json",
 ]
