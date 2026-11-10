@@ -26,6 +26,7 @@ pub struct Board {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Position {
+    pub ply: u16,
     pub snapshot: Board,
     /// Packed move IDs and their visit counts, in matching order.
     pub policy: Vec<(u16, u16)>,
@@ -35,7 +36,6 @@ pub struct Position {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Row {
     pub game_id: u64,
-    pub ply: u16,
     pub position: Position,
     /// Final result from the side-to-move perspective.
     pub value: i8,
@@ -70,12 +70,13 @@ mod tests {
     #[test]
     fn game_round_trip_preserves_positions_and_side_to_move_values() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let positions = [0, 1].map(|ply| Position {
+        let positions = [0, 3, 6].map(|ply| Position {
+            ply,
             snapshot: Board {
-                board: [ply; 32],
-                castling: 15 - ply,
-                ep_square: 64 - ply,
-                halfmove_clock: ply,
+                board: [ply as u8; 32],
+                castling: 15 - ply as u8,
+                ep_square: 64 - ply as u8,
+                halfmove_clock: ply as u8,
                 repetitions: 1,
             },
             policy: vec![(0x10ff, 15), (0x0402, 1), (0x0003, 0)],
@@ -90,10 +91,9 @@ mod tests {
             Ok(())
         })?;
         assert_eq!(rows.len(), positions.len());
-        for (ply, (row, position)) in rows.into_iter().zip(positions).enumerate() {
+        for (row, position) in rows.into_iter().zip(positions) {
             assert_eq!(row.game_id, 123);
-            assert_eq!(row.ply, ply as u16);
-            assert_eq!(row.value, if ply == 0 { 1 } else { -1 });
+            assert_eq!(row.value, if position.ply % 2 == 0 { 1 } else { -1 });
             assert_eq!(row.position, position);
             assert_eq!(row.generation_ns_per_position, Some(1234));
         }

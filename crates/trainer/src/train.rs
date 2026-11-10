@@ -25,15 +25,22 @@ struct TrainingSample {
 #[chess_config::toml_config]
 #[derive(serde::Serialize)]
 pub struct Config {
-    dataset: PathBuf,
     output_dir: PathBuf,
     pub device: chess_config::DeviceConfig,
-    train_positions: NonZeroUsize,
-    optimizer_steps: NonZeroUsize,
     batch_size: NonZeroUsize,
     optimizer: OptimizerConfig,
     seed: u64,
+    value_sample_rate: f64,
+    curriculum: Vec<CurriculumStep>,
     model: ModelConfig,
+}
+
+#[chess_config::toml_config]
+#[derive(serde::Serialize)]
+struct CurriculumStep {
+    dataset: PathBuf,
+    train_positions: NonZeroUsize,
+    optimizer_steps: NonZeroUsize,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -88,30 +95,45 @@ fn losses(net: &Net, batch: &Batch) -> candle_core::Result<[Tensor; 2]> {
     let (policy, wdl) = batch.inputs.logits(net, batch.piece_features.as_ref())?;
     let log_probs = log_softmax(&(&policy + &batch.mask)?, 1)?;
     let policy = (&log_probs * &batch.policy)?.sum(1)?.neg()?.mean_all()?;
-    Ok([
-        policy,
-        loss::cross_entropy(
-            &wdl.expect("training batch supplies value inputs"),
-            &batch.value,
-        )?,
-    ])
+    let value = if let Some(targets) = &batch.value {
+        let wdl = wdl.expect("training batch supplies value inputs");
+        let wdl = match &batch.value_indices {
+            Some(indices) => wdl.index_select(indices, 0)?,
+            None => wdl,
+        };
+        loss::cross_entropy(&wdl, targets)?
+    } else {
+        Tensor::zeros((), policy.dtype(), policy.device())?
+    };
+    Ok([policy, value])
 }
 
 pub fn run(config: Config, device: &Device) -> Result<()> {
     let Config {
-        ref dataset,
         ref output_dir,
-        train_positions,
-        optimizer_steps: planned_steps,
         batch_size,
         ref optimizer,
         seed,
+        value_sample_rate,
+        ref curriculum,
         model,
         ..
     } = config;
     let OptimizerConfig::Adamw(adamw) = optimizer;
     let uses_piece_counts = model.value.uses_piece_counts();
-    let (planned_steps, batch_size) = (planned_steps.get(), batch_size.get());
+    let batch_size = batch_size.get();
+    if curriculum.is_empty() {
+        return Err("curriculum must contain at least one phase".into());
+    }
+    let planned_steps = curriculum
+        .iter()
+        .try_fold(0usize, |total, step| {
+            total.checked_add(step.optimizer_steps.get())
+        })
+        .ok_or("total curriculum optimizer steps overflow")?;
+    if !(value_sample_rate > 0.0 && value_sample_rate <= 1.0) {
+        return Err("value_sample_rate must be in (0, 1]".into());
+    }
     if !adamw.learning_rate.is_finite() || adamw.learning_rate <= 0. {
         return Err("training optimizer.learning_rate must be positive and finite".into());
     }
@@ -127,14 +149,45 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         return Err(format!("output already exists: {}", output_dir.display()).into());
     }
     let setup_started = Instant::now();
-    let data = data::load(dataset, seed, train_positions.get())
-        .map_err(|error| format!("dataset {}: {error}", dataset.display()))?;
+    data::check_disjoint(curriculum.iter().map(|step| step.dataset.as_path()))?;
+    let datasets = curriculum
+        .iter()
+        .enumerate()
+        .map(|(index, step)| {
+            data::load(
+                &step.dataset,
+                seed,
+                step.train_positions.get(),
+                value_sample_rate,
+                index + 1 == curriculum.len(),
+            )
+            .map_err(|error| format!("dataset {}: {error}", step.dataset.display()).into())
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let held_out = datasets.last().expect("validated non-empty curriculum");
+    let train_games = datasets.iter().map(|data| data.train_games).sum::<usize>();
+    let train_positions = datasets.iter().map(|data| data.train.len()).sum::<usize>();
+    let generation_seconds = datasets
+        .iter()
+        .map(|data| data.estimated_generation_seconds)
+        .sum::<Option<f64>>();
     println!(
         "train: {} games / {} positions; test: {} games / {} positions",
-        data.train_games,
-        data.train.len(),
-        data.test_ids.len(),
-        data.test.len()
+        train_games,
+        train_positions,
+        held_out.test_ids.len(),
+        held_out.test.len()
+    );
+    let mut value_labels: Vec<_> = datasets
+        .iter()
+        .flat_map(|data| data.value_labels_per_game.iter().copied())
+        .collect();
+    value_labels.sort_unstable();
+    let value_label_count = value_labels.iter().sum::<usize>();
+    let value_p90 = value_labels[(value_labels.len() * 9).div_ceil(10) - 1];
+    println!(
+        "value supervision: {value_label_count} labels across {} games; p90 {value_p90} labels/game",
+        value_labels.len()
     );
     if device.is_cuda() {
         device.set_seed(seed)?;
@@ -154,8 +207,6 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
             weight_decay: adamw.weight_decay,
         },
     )?;
-    let mut indices: Vec<_> = (0..data.train.len()).collect();
-    let steps_per_epoch = indices.len().div_ceil(batch_size);
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut history = Vec::with_capacity(planned_steps.div_ceil(METRICS_INTERVAL));
     device.synchronize()?;
@@ -164,61 +215,93 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     let mut optimizer_steps = 0usize;
     let mut positions_seen = 0;
     let mut window_positions = 0;
+    let mut window_values = 0;
     let mut window_totals = [0.; 2];
-    for epoch in 1..=planned_steps.div_ceil(steps_per_epoch) {
-        let epoch_started = Instant::now();
-        indices.shuffle(&mut rng);
-        let mut totals = [0.; 2];
-        let mut epoch_positions = 0;
-        for chunk in indices
-            .chunks(batch_size)
-            .take(planned_steps - optimizer_steps)
-        {
-            let batch = Batch::new(&data.train, chunk, device, uses_piece_counts)?;
-            let [policy, value] = losses(&net, &batch)?;
-            let objective = (&policy + &value)?;
-            let lr =
-                adamw.learning_rate * adamw.schedule.multiplier(optimizer_steps, planned_steps);
-            optimizer.set_learning_rate(lr);
-            optimizer.backward_step(&objective)?;
-            optimizer_steps += 1;
-            epoch_positions += chunk.len();
-            positions_seen += chunk.len();
-            window_positions += chunk.len();
-            for ((total, window_total), loss) in totals
-                .iter_mut()
-                .zip(&mut window_totals)
-                .zip([policy, value])
-            {
-                let weighted = f64::from(loss.to_scalar::<f32>()?) * chunk.len() as f64;
-                *total += weighted;
-                *window_total += weighted;
+    let mut epoch = 0;
+    let mut phase_metrics = Vec::with_capacity(curriculum.len());
+    let mut completed_epochs = 0;
+    let mut partial_epoch_positions = 0;
+    for (index, (step, data)) in curriculum.iter().zip(&datasets).enumerate() {
+        let rows = &data.train;
+        let phase_steps = step.optimizer_steps.get();
+        let mut indices: Vec<_> = (0..rows.len()).collect();
+        let steps_per_epoch = indices.len().div_ceil(batch_size);
+        let end_step = optimizer_steps + phase_steps;
+        let phase_start = positions_seen;
+        for _ in 0..phase_steps.div_ceil(steps_per_epoch) {
+            epoch += 1;
+            let epoch_started = Instant::now();
+            indices.shuffle(&mut rng);
+            let mut totals = [0.; 2];
+            let mut epoch_positions = 0;
+            let mut epoch_values = 0;
+            for chunk in indices.chunks(batch_size).take(end_step - optimizer_steps) {
+                let batch = Batch::new(rows, chunk, device, uses_piece_counts)?;
+                let [policy, value] = losses(&net, &batch)?;
+                let objective = (&policy + &value)?;
+                let lr =
+                    adamw.learning_rate * adamw.schedule.multiplier(optimizer_steps, planned_steps);
+                optimizer.set_learning_rate(lr);
+                optimizer.backward_step(&objective)?;
+                optimizer_steps += 1;
+                epoch_positions += chunk.len();
+                positions_seen += chunk.len();
+                window_positions += chunk.len();
+                epoch_values += batch.value_count;
+                window_values += batch.value_count;
+                for (((total, window_total), loss), count) in totals
+                    .iter_mut()
+                    .zip(&mut window_totals)
+                    .zip([policy, value])
+                    .zip([chunk.len(), batch.value_count])
+                {
+                    let weighted = f64::from(loss.to_scalar::<f32>()?) * count as f64;
+                    *total += weighted;
+                    *window_total += weighted;
+                }
+                if optimizer_steps.is_multiple_of(METRICS_INTERVAL)
+                    || optimizer_steps == planned_steps
+                {
+                    let [policy, wdl] = [
+                        window_totals[0] / window_positions as f64,
+                        window_totals[1] / window_values.max(1) as f64,
+                    ];
+                    history.push(TrainingSample {
+                        policy,
+                        wdl,
+                        lr,
+                        elapsed: training_started.elapsed().as_secs_f64(),
+                        step: optimizer_steps,
+                        positions: positions_seen,
+                        epoch,
+                    });
+                    window_totals = [0.; 2];
+                    window_positions = 0;
+                    window_values = 0;
+                }
             }
-            if optimizer_steps.is_multiple_of(METRICS_INTERVAL) || optimizer_steps == planned_steps
-            {
-                let [policy, wdl] = window_totals.map(|total| total / window_positions as f64);
-                history.push(TrainingSample {
-                    policy,
-                    wdl,
-                    lr,
-                    elapsed: training_started.elapsed().as_secs_f64(),
-                    step: optimizer_steps,
-                    positions: positions_seen,
-                    epoch,
-                });
-                window_totals = [0.; 2];
-                window_positions = 0;
+            let [policy, value] = [
+                totals[0] / epoch_positions as f64,
+                totals[1] / epoch_values.max(1) as f64,
+            ];
+            if !policy.is_finite() || !value.is_finite() {
+                return Err("non-finite training loss".into());
             }
+            println!(
+                "epoch {epoch}: {epoch_positions}/{} positions; train policy {policy:.4}, WDL {value:.4}, {:.1}s",
+                rows.len(),
+                epoch_started.elapsed().as_secs_f64()
+            );
         }
-        let [policy, value] = totals.map(|loss| loss / epoch_positions as f64);
-        if !policy.is_finite() || !value.is_finite() {
-            return Err("non-finite training loss".into());
-        }
-        println!(
-            "epoch {epoch}: {epoch_positions}/{} positions; train policy {policy:.4}, WDL {value:.4}, {:.1}s",
-            data.train.len(),
-            epoch_started.elapsed().as_secs_f64()
-        );
+        let phase_completed = phase_steps / steps_per_epoch;
+        completed_epochs += phase_completed;
+        partial_epoch_positions = (phase_steps % steps_per_epoch) * batch_size;
+        phase_metrics.push(json!({
+            "phase": index + 1,
+            "positions": rows.len(),
+            "optimizer_steps": phase_steps,
+            "positions_seen": positions_seen - phase_start,
+        }));
     }
     device.synchronize()?;
     let evaluation_started = Instant::now();
@@ -237,24 +320,24 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     let builder = VarBuilder::from_tensors(tensors.clone(), DType::F32, device);
     let net = Net::new(builder, model)?;
     let mut counts = [1.; 3];
-    for row in &data.train {
+    for row in datasets.iter().flat_map(|data| &data.train) {
         counts[row.value as usize] += 1.;
     }
     let count_sum = counts.iter().sum::<f64>();
     let mut totals = [0.; 3];
     let mut value_baseline = 0.;
-    let indices: Vec<_> = (0..data.test.len()).collect();
+    let indices: Vec<_> = (0..held_out.test.len()).collect();
     for chunk in indices.chunks(batch_size) {
-        let batch = Batch::new(&data.test, chunk, device, uses_piece_counts)?;
+        let batch = Batch::new(&held_out.test, chunk, device, uses_piece_counts)?;
         for (total, loss) in totals.iter_mut().zip(losses(&net, &batch)?) {
             *total += f64::from(loss.to_scalar::<f32>()?) * chunk.len() as f64;
         }
         totals[2] += batch.uniform_loss;
         for &row in chunk {
-            value_baseline -= (counts[data.test[row].value as usize] / count_sum).ln();
+            value_baseline -= (counts[held_out.test[row].value as usize] / count_sum).ln();
         }
     }
-    let test_count = data.test.len() as f64;
+    let test_count = held_out.test.len() as f64;
     let [policy, value, uniform] = totals.map(|loss| loss / test_count);
     let value_baseline = value_baseline / test_count;
     if !policy.is_finite() || !value.is_finite() {
@@ -267,33 +350,35 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     device.synchronize()?;
     let evaluation_seconds = evaluation_started.elapsed().as_secs_f64();
 
-    let completed_epochs = optimizer_steps / steps_per_epoch;
-    let partial_epoch_positions = (optimizer_steps % steps_per_epoch) * batch_size;
     println!(
         "epochs: {completed_epochs} complete, {partial_epoch_positions}/{} positions in a partial epoch",
-        data.train.len()
+        held_out.train.len()
     );
 
     let mut metrics = json!({
         "completed_epochs": completed_epochs,
         "partial_epoch_positions": partial_epoch_positions,
         "optimizer_steps": optimizer_steps,
+        "training_phases": phase_metrics,
         "setup_seconds": setup_seconds,
         "training_seconds": training_seconds,
         "evaluation_seconds": evaluation_seconds,
         "dtype": "f32",
         "layer_norm_backward": true,
-        "train_games": data.train_games,
-        "train_positions": data.train.len(),
-        "test_game_ids": data.test_ids,
-        "test_positions": data.test.len(),
+        "train_games": train_games,
+        "train_positions": train_positions,
+        "value_train_positions": value_label_count,
+        "value_train_games": value_labels.len(),
+        "value_labels_per_game_p90": value_p90,
+        "test_game_ids": held_out.test_ids,
+        "test_positions": held_out.test.len(),
         "test_policy_loss": policy,
         "uniform_policy_loss": uniform,
         "beats_uniform_policy": beats_uniform,
         "test_wdl_loss": value,
         "prior_wdl_loss": value_baseline,
     });
-    if let Some(generation) = data.estimated_generation_seconds {
+    if let Some(generation) = generation_seconds {
         metrics["estimated_generation_seconds"] = json!(generation);
     }
     checkpoint::save(output_dir, tensors, &config, metrics)?;
@@ -321,7 +406,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     println!(
         "runtime: {timed_seconds:.2}s timed (training, held-out evaluation, and save); {setup_seconds:.2}s setup excluded; {optimizer_steps} optimizer steps ({training_seconds:.2}s training, {evaluation_seconds:.2}s held-out evaluation)"
     );
-    if let Some(generation) = data.estimated_generation_seconds {
+    if let Some(generation) = generation_seconds {
         let spent = timed_seconds + GENERATION_BUDGET_WEIGHT * generation;
         println!(
             "training budget: {spent:.2}s spent ({timed_seconds:.2}s timed runtime + {GENERATION_BUDGET_WEIGHT} × {generation:.2}s estimated generation)"

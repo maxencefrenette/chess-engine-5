@@ -1,12 +1,14 @@
 output_dir = "/data/chess/chess-engine-5/models/smolgen-experiment"
 device = "cuda"
-dataset = "/data/chess/chess-engine-5/training-data/v2/1794316173826234974-1165184"
-# After each pass over the selected positions, reshuffle and start a new epoch
-# until the optimizer_steps budget is exhausted.
-train_positions = 250301
-optimizer_steps = 30151
 batch_size = 128
 seed = 42
+value_sample_rate = 1.0
+
+# Each phase runs as many epochs as needed over its selected positions until its optimizer steps are exhausted.
+[[curriculum]]
+dataset = "/data/chess/chess-engine-5/training-data/v2/1794316173826234974-1165184"
+train_positions = 250301
+optimizer_steps = 30151
 
 [optimizer]
 kind = "adamw"

@@ -6,7 +6,7 @@ use std::{
 };
 
 use chess_data::{FORMAT_VERSION, Position, Result, write_shard};
-use rand::SeedableRng;
+use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde_json::json;
 
@@ -28,6 +28,17 @@ pub struct Config {
     visits_per_move: NonZeroU16,
     seed: u64,
     temperature: f64,
+    playout_cap: PlayoutCap,
+}
+
+#[derive(Clone, Copy, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+enum PlayoutCap {
+    Disabled {},
+    Enabled {
+        fast_visits: NonZeroU16,
+        full_search_rate: f64,
+    },
 }
 
 struct PlayedGame {
@@ -40,40 +51,54 @@ struct ActiveGame {
     game: Game,
     search: Search,
     rng: ChaCha8Rng,
+    cap_rng: ChaCha8Rng,
+    ply: u16,
+    full_search: bool,
     positions: Vec<Position>,
 }
 
 impl ActiveGame {
-    fn new(seed: u64, id: usize) -> Self {
+    fn new(seed: u64, id: usize, full_search_rate: f64) -> Self {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         rng.set_stream(id as u64);
+        let mut cap_rng = ChaCha8Rng::seed_from_u64(seed ^ 0x706c_6179_6f75_7463);
+        cap_rng.set_stream(id as u64);
+        let full_search = cap_rng.random_bool(full_search_rate);
         Self {
             id,
             game: Game::default(),
             search: Search::new(),
             rng,
+            cap_rng,
+            ply: 0,
+            full_search,
             positions: Vec::new(),
         }
     }
 
-    fn play(&mut self, temperature: f64) -> Option<Outcome> {
-        let policy: Vec<_> = self.search.visits().collect();
+    fn play(&mut self, temperature: f64, full_search_rate: f64) -> Option<Outcome> {
         let played = self.search.choose_move(temperature, &mut self.rng);
-        let legal_moves: Vec<_> = policy.iter().map(|entry| entry.mv).collect();
-        self.positions.push(Position {
-            snapshot: self.game.snapshot(&legal_moves),
-            policy: policy
-                .into_iter()
-                .map(|entry| {
-                    (
-                        entry.mv.packed(),
-                        u16::try_from(entry.visits).expect("visits fit in u16"),
-                    )
-                })
-                .collect(),
-            played_move: played.packed(),
-        });
+        if self.full_search {
+            let policy: Vec<_> = self.search.visits().collect();
+            let legal_moves: Vec<_> = policy.iter().map(|entry| entry.mv).collect();
+            self.positions.push(Position {
+                ply: self.ply,
+                snapshot: self.game.snapshot(&legal_moves),
+                policy: policy
+                    .into_iter()
+                    .map(|entry| {
+                        (
+                            entry.mv.packed(),
+                            u16::try_from(entry.visits).expect("visits fit in u16"),
+                        )
+                    })
+                    .collect(),
+                played_move: played.packed(),
+            });
+        }
         self.game.play_legal(played);
+        self.ply += 1;
+        self.full_search = self.cap_rng.random_bool(full_search_rate);
         self.search = Search::new();
         self.game.outcome()
     }
@@ -85,19 +110,32 @@ fn play_batch(
     config: &Config,
     ids: std::ops::Range<usize>,
 ) -> Result<Vec<(usize, PlayedGame)>> {
-    let visits = NonZeroU32::from(config.visits_per_move);
-    let mut active: Vec<_> = ids.map(|id| ActiveGame::new(config.seed, id)).collect();
+    let (fast_visits, full_search_rate) = match config.playout_cap {
+        PlayoutCap::Disabled {} => (config.visits_per_move, 1.0),
+        PlayoutCap::Enabled {
+            fast_visits,
+            full_search_rate,
+        } => (fast_visits, full_search_rate),
+    };
+    let mut active: Vec<_> = ids
+        .map(|id| ActiveGame::new(config.seed, id, full_search_rate))
+        .collect();
     let mut completed = Vec::with_capacity(active.len());
     while !active.is_empty() {
         let mut pending = Vec::new();
         let mut finished = Vec::new();
         for (i, slot) in active.iter_mut().enumerate() {
-            if let Some(leaf) = slot
-                .search
-                .next_leaf(&slot.game, visits, settings.exploration)
+            let visits = if slot.full_search {
+                config.visits_per_move
+            } else {
+                fast_visits
+            };
+            if let Some(leaf) =
+                slot.search
+                    .next_leaf(&slot.game, NonZeroU32::from(visits), settings.exploration)
             {
                 pending.push((i, leaf));
-            } else if let Some(outcome) = slot.play(config.temperature) {
+            } else if let Some(outcome) = slot.play(config.temperature, full_search_rate) {
                 let white_value = match outcome {
                     Outcome::Win(Color::White) => 1,
                     Outcome::Win(Color::Black) => -1,
@@ -131,6 +169,17 @@ pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) ->
     if !config.temperature.is_finite() || config.temperature < 0.0 {
         return Err("self-play temperature must be finite and nonnegative".into());
     }
+    if let PlayoutCap::Enabled {
+        fast_visits,
+        full_search_rate,
+    } = config.playout_cap
+        && (!(full_search_rate > 0.0 && full_search_rate <= 1.0)
+            || fast_visits >= config.visits_per_move)
+    {
+        return Err(
+            "playout cap requires a rate in (0, 1] and fewer visits for fast searches".into(),
+        );
+    }
     let version = config.output_dir.join(format!("v{FORMAT_VERSION}"));
     fs::create_dir_all(&version)?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
@@ -155,6 +204,9 @@ pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) ->
         }
         let elapsed = started.elapsed();
         let shard_positions: usize = games.iter().map(|(_, game)| game.positions.len()).sum();
+        if shard_positions == 0 {
+            return Err("shard contains no full-search positions".into());
+        }
         let generation_ns_per_position =
             u64::try_from(elapsed.as_nanos() / shard_positions as u128)?;
         write_shard(
@@ -162,6 +214,7 @@ pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) ->
             shards,
             games
                 .iter()
+                .filter(|(_, game)| !game.positions.is_empty())
                 .map(|(id, game)| (*id as u64, game.positions.as_slice(), game.white_value)),
             generation_ns_per_position,
         )?;
@@ -191,6 +244,7 @@ pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) ->
         "draws": draws,
         "start_position": "standard",
         "visits_per_move": config.visits_per_move.get(),
+        "playout_cap": config.playout_cap,
         "value": model.value_config(),
         "priors": "smolgen-policy-v1",
         "checkpoint": model.model_dir,

@@ -1,13 +1,13 @@
 use std::{error::Error, fs, path::Path, process::ExitCode};
 
-use syn::{Item, ItemStruct, Meta, Token, Type, punctuated::Punctuated};
+use syn::{Item, ItemStruct, Meta, Token, Type, punctuated::Punctuated, spanned::Spanned};
 
 #[derive(Default)]
-struct SerdeFieldDefaults {
+struct ConfigLints {
     violations: Vec<(usize, usize, String)>,
 }
 
-impl SerdeFieldDefaults {
+impl ConfigLints {
     fn check_items(&mut self, items: &[Item]) {
         let mut configs = std::collections::HashSet::new();
         for item in items {
@@ -53,6 +53,21 @@ impl SerdeFieldDefaults {
 
     fn check_fields(&mut self, item: &ItemStruct) {
         for (index, field) in item.fields.iter().enumerate() {
+            let name = field
+                .ident
+                .as_ref()
+                .map_or_else(|| index.to_string(), ToString::to_string);
+            if is_option_type(&field.ty) {
+                let location = field.ty.span().start();
+                self.violations.push((
+                    location.line,
+                    location.column + 1,
+                    format!(
+                        "toml_optional_field: {}.{name} must not use Option\n  = reason: a tagged enum makes the available modes and the settings for each mode explicit.\n  = help: use a tagged enum and select a variant in the checked-in TOML",
+                        item.ident
+                    ),
+                ));
+            }
             for attr in &field.attrs {
                 if !attr.path().is_ident("serde") {
                     continue;
@@ -65,10 +80,6 @@ impl SerdeFieldDefaults {
                     .filter(|option| option.path().is_ident("default"))
                 {
                     let location = option.path().segments[0].ident.span().start();
-                    let name = field
-                        .ident
-                        .as_ref()
-                        .map_or_else(|| index.to_string(), ToString::to_string);
                     self.violations.push((
                         location.line,
                         location.column + 1,
@@ -80,6 +91,22 @@ impl SerdeFieldDefaults {
                 }
             }
         }
+    }
+}
+
+fn is_option_type(ty: &Type) -> bool {
+    match ty {
+        Type::Path(ty) if ty.qself.is_none() => {
+            let segments = &ty.path.segments;
+            segments.last().is_some_and(|last| last.ident == "Option")
+                && (segments.len() == 1
+                    || (segments.len() == 3
+                        && (segments[0].ident == "std" || segments[0].ident == "core")
+                        && segments[1].ident == "option"))
+        }
+        Type::Paren(ty) => is_option_type(&ty.elem),
+        Type::Group(ty) => is_option_type(&ty.elem),
+        _ => false,
     }
 }
 
@@ -118,7 +145,7 @@ fn check_tree(directory: &Path) -> Result<bool, Box<dyn Error>> {
             let source = fs::read_to_string(&path)?;
             let file =
                 syn::parse_file(&source).map_err(|error| format!("{}: {error}", path.display()))?;
-            let mut lint = SerdeFieldDefaults::default();
+            let mut lint = ConfigLints::default();
             lint.check_items(&file.items);
             for (line, column, message) in lint.violations {
                 eprintln!("{}:{line}:{column}: {message}", path.display());
@@ -167,7 +194,7 @@ mod tests {
         "#,
         )
         .unwrap();
-        let mut lint = SerdeFieldDefaults::default();
+        let mut lint = ConfigLints::default();
         lint.check_items(&file.items);
         let hits: Vec<_> = lint
             .violations
@@ -183,10 +210,51 @@ mod tests {
                     "serde_field_default: Settings.named must not declare a Serde default"
                 ),
                 (
+                    11,
+                    31,
+                    "toml_optional_field: Settings.optional must not use Option"
+                ),
+                (
                     15,
                     38,
                     "serde_field_default: Tuple.0 must not declare a Serde default"
                 ),
+            ]
+        );
+    }
+
+    #[test]
+    fn detects_option_fields_only_on_toml_config_structs() {
+        let file = syn::parse_file(
+            r#"
+            struct Runtime { optional: Option<u32> }
+
+            #[derive(Deserialize, chess_config::TomlConfig)]
+            struct Settings {
+                std_option: std::option::Option<u32>,
+                core_option: ::core::option::Option<u32>,
+                collection: Vec<Option<u32>>,
+                custom: other::Option<u32>,
+            }
+
+            struct Tuple(Option<u32>);
+            impl TomlConfig for Tuple {}
+            "#,
+        )
+        .unwrap();
+        let mut lint = ConfigLints::default();
+        lint.check_items(&file.items);
+        let hits: Vec<_> = lint
+            .violations
+            .iter()
+            .map(|(_, _, message)| message.lines().next().unwrap())
+            .collect();
+        assert_eq!(
+            hits,
+            [
+                "toml_optional_field: Settings.std_option must not use Option",
+                "toml_optional_field: Settings.core_option must not use Option",
+                "toml_optional_field: Tuple.0 must not use Option",
             ]
         );
     }

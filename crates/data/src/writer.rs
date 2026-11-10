@@ -75,8 +75,8 @@ fn encode_game(
         schema,
         vec![
             Arc::new(UInt64Array::from(vec![game_id; rows.len()])),
-            Arc::new(UInt16Array::from(
-                (0..u16::try_from(rows.len())?).collect::<Vec<_>>(),
+            Arc::new(UInt16Array::from_iter_values(
+                rows.iter().map(|row| row.ply),
             )),
             Arc::new(board.finish()),
             Arc::new(UInt8Array::from_iter_values(
@@ -96,8 +96,8 @@ fn encode_game(
             Arc::new(UInt16Array::from_iter_values(
                 rows.iter().map(|row| row.played_move),
             )),
-            Arc::new(Int8Array::from_iter_values((0..rows.len()).map(|ply| {
-                if ply % 2 == 0 {
+            Arc::new(Int8Array::from_iter_values(rows.iter().map(|row| {
+                if row.ply % 2 == 0 {
                     white_value
                 } else {
                     -white_value

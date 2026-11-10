@@ -82,10 +82,10 @@ pub fn read_shard(path: &Path, mut visit: impl FnMut(Row) -> Result<()>) -> Resu
             }
             visit(Row {
                 game_id: ids.value(i),
-                ply: ply.value(i),
                 value,
                 generation_ns_per_position: timing.map(|column| column.value(i)),
                 position: Position {
+                    ply: ply.value(i),
                     snapshot: Board {
                         board: board.value(i).try_into()?,
                         castling: castling.value(i),
