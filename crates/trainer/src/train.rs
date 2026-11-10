@@ -39,8 +39,21 @@ pub struct Config {
 #[derive(serde::Serialize)]
 struct CurriculumStep {
     dataset: PathBuf,
-    train_positions: NonZeroUsize,
-    optimizer_steps: NonZeroUsize,
+    num_positions: NonZeroUsize,
+    epochs: f64,
+}
+
+impl CurriculumStep {
+    fn optimizer_steps(&self, positions: usize, batch_size: usize) -> Result<usize> {
+        let batches_per_epoch = positions.div_ceil(batch_size);
+        let steps = (self.epochs * batches_per_epoch as f64).floor();
+        if !(1.0..usize::MAX as f64).contains(&steps) {
+            return Err(
+                "curriculum epochs must schedule at least one batch and fit in usize".into(),
+            );
+        }
+        Ok(steps as usize)
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -125,12 +138,6 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     if curriculum.is_empty() {
         return Err("curriculum must contain at least one phase".into());
     }
-    let planned_steps = curriculum
-        .iter()
-        .try_fold(0usize, |total, step| {
-            total.checked_add(step.optimizer_steps.get())
-        })
-        .ok_or("total curriculum optimizer steps overflow")?;
     if !(value_sample_rate > 0.0 && value_sample_rate <= 1.0) {
         return Err("value_sample_rate must be in (0, 1]".into());
     }
@@ -157,13 +164,26 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
             data::load(
                 &step.dataset,
                 seed,
-                step.train_positions.get(),
+                step.num_positions.get(),
                 value_sample_rate,
                 index + 1 == curriculum.len(),
             )
             .map_err(|error| format!("dataset {}: {error}", step.dataset.display()).into())
         })
         .collect::<Result<Vec<_>>>()?;
+    let phase_steps = curriculum
+        .iter()
+        .zip(&datasets)
+        .enumerate()
+        .map(|(index, (step, data))| {
+            step.optimizer_steps(data.train.len(), batch_size)
+                .map_err(|error| format!("curriculum phase {}: {error}", index + 1).into())
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let planned_steps = phase_steps
+        .iter()
+        .try_fold(0usize, |total, &steps| total.checked_add(steps))
+        .ok_or("total curriculum optimizer steps overflow")?;
     let held_out = datasets.last().expect("validated non-empty curriculum");
     let train_games = datasets.iter().map(|data| data.train_games).sum::<usize>();
     let train_positions = datasets.iter().map(|data| data.train.len()).sum::<usize>();
@@ -221,9 +241,8 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     let mut phase_metrics = Vec::with_capacity(curriculum.len());
     let mut completed_epochs = 0;
     let mut partial_epoch_positions = 0;
-    for (index, (step, data)) in curriculum.iter().zip(&datasets).enumerate() {
+    for (index, (data, phase_steps)) in datasets.iter().zip(phase_steps).enumerate() {
         let rows = &data.train;
-        let phase_steps = step.optimizer_steps.get();
         let mut indices: Vec<_> = (0..rows.len()).collect();
         let steps_per_epoch = indices.len().div_ceil(batch_size);
         let end_step = optimizer_steps + phase_steps;
@@ -301,6 +320,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
             "positions": rows.len(),
             "optimizer_steps": phase_steps,
             "positions_seen": positions_seen - phase_start,
+            "epochs": (positions_seen - phase_start) as f64 / rows.len() as f64,
         }));
     }
     device.synchronize()?;
@@ -423,6 +443,23 @@ mod tests {
     use chess_network::{INPUTS, SQUARES, value::ValueConfig};
 
     use super::*;
+
+    #[test]
+    fn curriculum_epochs_skip_fractional_steps() -> Result<()> {
+        let config = Config::from_repo_file("training.toml")?;
+        let mut step = config.curriculum.into_iter().next().unwrap();
+        step.epochs = 2.0;
+        assert_eq!(step.optimizer_steps(129, 128)?, 4);
+        step.epochs = 1.25;
+        assert_eq!(step.optimizer_steps(129, 128)?, 2);
+        step.epochs = 1.75;
+        assert_eq!(step.optimizer_steps(129, 128)?, 3);
+        step.epochs = 0.8;
+        assert_eq!(step.optimizer_steps(640, 128)?, 4);
+        step.epochs = 0.0;
+        assert!(step.optimizer_steps(129, 128).is_err());
+        Ok(())
+    }
 
     #[test]
     fn cosine_schedule_warms_up_and_reaches_its_floor() {
