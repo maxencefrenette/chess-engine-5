@@ -1,4 +1,4 @@
-baseline_dir = "/data/chess/chess-engine-5/models/twenty-minute-baseline.K6HSia/checkpoint"
+baseline_dir = "/data/chess/chess-engine-5/models/data-reuse-sweep.5w16bD/positions-375000-run-1"
 device = "cuda"
 batch = 64
 leaves_per_game = 4
