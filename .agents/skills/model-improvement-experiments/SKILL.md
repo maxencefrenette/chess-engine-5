@@ -21,17 +21,31 @@ Treat a sweep as one experiment. Train all variants from the same baseline recip
 
 ## Evaluation
 
-The final test that determines whether an experiment is successful is a match against the baseline with SPRT testing. The new model must be run against the old model using the following command:
+Choose one SPRT mode before running the baseline match, based on the experiment's goal.
+
+Use `gainer` for experiments that aim to improve playing strength under a fixed training and inference budget.
+
+* Model architecture improvements
+* Model training recipe improvements
+* Lower training cost, the model should be trained for more steps in the same wall-clock time budget, which should result in an improvement.
+* Lower inference cost, the SPRT match will automatically assign more visits to the faster candidate, which should result in increased playing strength.
 
 ```sh
 mise run eval-model -- gainer "$candidate_dir"
 ```
 
+Use `non-regression` when the goal is to simplify the codebase, model, or training recipe while preserving playing strength.
+
+* Codebase simplifications
+* Ablations that simplify the model architecture
+* Ablations that remove the need for a hyperparameter
+
 ```sh
 mise run eval-model -- non-regression "$candidate_dir"
 ```
 
-After a successful experiment, update the baseline:
+
+Update the baseline after a successful experiment.
 
 ```sh
 mise run update-model -- "$candidate_dir"
