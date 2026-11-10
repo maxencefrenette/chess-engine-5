@@ -1,8 +1,8 @@
-use std::{collections::BTreeSet, fs, path::Path};
+use std::{collections::BTreeSet, path::Path};
 
 use candle_core::{Device, Tensor};
 pub use chess_data::Result;
-use chess_data::read_shard;
+use chess_data::{discover_shards, read_shard};
 use rand::{SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha8Rng;
 
@@ -29,21 +29,8 @@ pub struct Dataset {
 }
 
 pub fn load(dataset: &Path, seed: u64, train_positions: usize) -> Result<Dataset> {
-    let shards = if dataset.is_dir() {
-        let mut shards = Vec::new();
-        for entry in fs::read_dir(dataset)? {
-            let path = entry?.path();
-            if path.extension().is_some_and(|ext| ext == "parquet") && path.is_file() {
-                shards.push(path);
-            }
-        }
-        shards.sort_unstable();
-        shards
-    } else {
-        vec![dataset.into()]
-    };
     let mut rows = Vec::new();
-    for shard in shards {
+    for shard in discover_shards(dataset)? {
         read_shard(&shard, |row| {
             rows.push(row);
             Ok(())

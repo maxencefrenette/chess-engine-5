@@ -1,4 +1,8 @@
-use std::{fs::File, path::Path};
+use std::{
+    fs::{self, File},
+    io,
+    path::{Path, PathBuf},
+};
 
 use arrow_array::{
     BinaryArray, FixedSizeBinaryArray, Int8Array, UInt8Array, UInt16Array, UInt64Array,
@@ -6,6 +10,22 @@ use arrow_array::{
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::{Board, GENERATION_TIME_COLUMN, Position, Result, Row, schema};
+
+/// Accept a single shard or list the Parquet files in a directory in path order.
+pub fn discover_shards(path: &Path) -> io::Result<Vec<PathBuf>> {
+    if !path.is_dir() {
+        return Ok(vec![path.into()]);
+    }
+    let mut shards = Vec::new();
+    for entry in fs::read_dir(path)? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|ext| ext == "parquet") && path.is_file() {
+            shards.push(path);
+        }
+    }
+    shards.sort_unstable();
+    Ok(shards)
+}
 
 /// Decode a shard one Arrow batch at a time, visiting rows in file order.
 pub fn read_shard(path: &Path, mut visit: impl FnMut(Row) -> Result<()>) -> Result<()> {

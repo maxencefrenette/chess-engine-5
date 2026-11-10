@@ -24,13 +24,6 @@ export LD_LIBRARY_PATH="$CUDA_HOME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 exec
 """
 
-[tasks.check-cuda]
-description = "Build Candle with CUDA and check a GPU training step"
-run = [
-  "mise run with-cuda -- nvcc --version",
-  "mise run with-cuda -- cargo run --locked -p chess-trainer --features cuda -- check-device cuda",
-]
-
 [tasks.eval-model]
 description = "Evaluate a candidate checkpoint against a baseline on CUDA"
 run = "mise run with-cuda -- cargo run --release --locked -p chess-engine --features cuda -- eval-model"

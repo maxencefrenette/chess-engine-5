@@ -81,15 +81,3 @@ impl std::fmt::Display for DeviceConfig {
         })
     }
 }
-
-impl std::str::FromStr for DeviceConfig {
-    type Err = &'static str;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "cpu" => Ok(Self::Cpu),
-            "cuda" => Ok(Self::Cuda),
-            _ => Err("device must be cpu or cuda"),
-        }
-    }
-}

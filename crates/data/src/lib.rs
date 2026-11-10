@@ -7,7 +7,7 @@ use std::{error::Error, sync::Arc};
 
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 
-pub use reader::read_shard;
+pub use reader::{discover_shards, read_shard};
 pub use writer::write_shard;
 
 pub const FORMAT_VERSION: u32 = 2;
