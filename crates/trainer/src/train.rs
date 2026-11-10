@@ -14,8 +14,8 @@ pub struct Config {
     dataset: PathBuf,
     output_dir: PathBuf,
     pub device: chess_config::DeviceConfig,
-    epochs: NonZeroUsize,
-    max_steps: usize,
+    train_positions: NonZeroUsize,
+    optimizer_steps: NonZeroUsize,
     batch_size: NonZeroUsize,
     optimizer: OptimizerConfig,
     seed: u64,
@@ -93,8 +93,8 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     let Config {
         dataset,
         output_dir,
-        epochs,
-        max_steps,
+        train_positions,
+        optimizer_steps: planned_steps,
         batch_size,
         optimizer: optimizer_config,
         seed,
@@ -102,7 +102,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         ..
     } = config;
     let OptimizerConfig::Adamw(adamw) = &optimizer_config;
-    let (epochs, batch_size) = (epochs.get(), batch_size.get());
+    let (planned_steps, batch_size) = (planned_steps.get(), batch_size.get());
     if !adamw.learning_rate.is_finite() || adamw.learning_rate <= 0. {
         return Err("training optimizer.learning_rate must be positive and finite".into());
     }
@@ -118,7 +118,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         return Err(format!("output already exists: {}", output_dir.display()).into());
     }
     let setup_started = Instant::now();
-    let data = data::load(&dataset, seed)
+    let data = data::load(&dataset, seed, train_positions.get())
         .map_err(|error| format!("dataset {}: {error}", dataset.display()))?;
     println!(
         "train: {} games / {} positions; test: {} games / {} positions",
@@ -147,28 +147,21 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         },
     )?;
     let mut indices: Vec<_> = (0..data.train.len()).collect();
-    let available_steps = indices.len().div_ceil(batch_size).saturating_mul(epochs);
-    let planned_steps = if max_steps == 0 {
-        available_steps
-    } else {
-        available_steps.min(max_steps)
-    };
+    let steps_per_epoch = indices.len().div_ceil(batch_size);
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     device.synchronize()?;
     let training_started = Instant::now();
     let setup_seconds = training_started.duration_since(setup_started).as_secs_f64();
     let mut optimizer_steps = 0usize;
-    for epoch in 1..=epochs {
+    for epoch in 1..=planned_steps.div_ceil(steps_per_epoch) {
         let epoch_started = Instant::now();
         indices.shuffle(&mut rng);
         let mut totals = [0.; 2];
         let mut epoch_positions = 0;
-        let remaining = if max_steps == 0 {
-            usize::MAX
-        } else {
-            max_steps - optimizer_steps
-        };
-        for chunk in indices.chunks(batch_size).take(remaining) {
+        for chunk in indices
+            .chunks(batch_size)
+            .take(planned_steps - optimizer_steps)
+        {
             let batch = Batch::new(&data.train, chunk, device)?;
             let [policy, value] = losses(&net, &playing_value, &batch)?;
             let objective = (&policy + &value)?;
@@ -187,12 +180,10 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
             return Err("non-finite training loss".into());
         }
         println!(
-            "epoch {epoch}/{epochs}: train policy {policy:.4}, WDL {value:.4}, {:.1}s",
+            "epoch {epoch}: {epoch_positions}/{} positions; train policy {policy:.4}, WDL {value:.4}, {:.1}s",
+            data.train.len(),
             epoch_started.elapsed().as_secs_f64()
         );
-        if optimizer_steps == max_steps {
-            break;
-        }
     }
     device.synchronize()?;
     let evaluation_started = Instant::now();
@@ -242,16 +233,23 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     device.synchronize()?;
     let evaluation_seconds = evaluation_started.elapsed().as_secs_f64();
 
+    let completed_epochs = optimizer_steps / steps_per_epoch;
+    let partial_epoch_positions = (optimizer_steps % steps_per_epoch) * batch_size;
+    println!(
+        "epochs: {completed_epochs} complete, {partial_epoch_positions}/{} positions in a partial epoch",
+        data.train.len()
+    );
+
     let config = checkpoint::config(
         model,
         json!({
                 "source": dataset,
                 "seed": seed,
-                "epochs": epochs,
+                "completed_epochs": completed_epochs,
+                "partial_epoch_positions": partial_epoch_positions,
                 "batch_size": batch_size,
                 "optimizer": optimizer_config,
                 "optimizer_steps": optimizer_steps,
-                "max_steps": max_steps,
                 "setup_seconds": setup_seconds,
                 "training_seconds": training_seconds,
                 "evaluation_seconds": evaluation_seconds,
@@ -260,6 +258,8 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
                 "layer_norm_backward": true,
                 "train_games": data.train_games,
                 "train_positions": data.train.len(),
+                "requested_train_positions": train_positions.get(),
+                "estimated_generation_seconds": data.estimated_generation_seconds,
                 "test_game_ids": data.test_ids,
                 "test_positions": data.test.len(),
                 "test_policy_loss": policy,
@@ -275,6 +275,14 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     println!(
         "runtime: {timed_seconds:.2}s timed (training, held-out evaluation, and save); {setup_seconds:.2}s setup excluded; {optimizer_steps} optimizer steps ({training_seconds:.2}s training, {evaluation_seconds:.2}s held-out evaluation)"
     );
+    if let Some(generation) = data.estimated_generation_seconds {
+        println!(
+            "data budget: {generation:.2}s estimated generation, {:.2}s including timed training",
+            generation + timed_seconds
+        );
+    } else {
+        println!("data budget: generation time unavailable for this dataset");
+    }
     Ok(())
 }
 

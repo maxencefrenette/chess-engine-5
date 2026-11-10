@@ -1,9 +1,10 @@
 output_dir = "/data/chess/chess-engine-5/models/smolgen-experiment"
 device = "cuda"
 dataset = "/data/chess/chess-engine-5/training-data/v1/1794179515052280911-75339/part-00000.parquet"
-epochs = 5
-# Zero runs all configured epochs.
-max_steps = 0
+# After each pass over the selected positions, reshuffle and start a new epoch
+# until the optimizer_steps budget is exhausted.
+train_positions = 182378
+optimizer_steps = 7125
 batch_size = 128
 seed = 42
 
