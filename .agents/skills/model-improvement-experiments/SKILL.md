@@ -1,25 +1,43 @@
 ---
 name: model-improvement-experiments
-description: Plan, run, and interpret Chess Engine 5 experiments that change the model architecture or training recipe.
+description: Plan, run, and interpret Chess Engine 5 experiments on training data, model architecture, training recipes, and model inference.
 ---
 
 # Scope
 
-This skill describes how to run and evaluate experiments that improve the model architecture or training recipes. Modifications to the training data or to the engine are out of scope.
+This skill covers data generation and labeling, data selection and sampling, model architecture, training recipes, and model inference. Engine and search changes are out of scope.
 
 ## Multiple experiments
 
-Run experiments sequentially. Finish each experiment’s evaluation and promotion decision before training the next candidate. Use the current baseline’s architecture and training recipe as the starting settings for each experiment.
+Run experiments sequentially. Finish each experiment’s evaluation and promotion decision before starting the next candidate in order to start from an updated baseline.
 
 ## Training budget
 
-Keep the budget fixed at 1,800 seconds. Use the training budget reported by `mise run train`. It adds timed runtime to 0.3 times the estimated generation time for the selected training positions, charging each position once across all epochs and excluding held-out generation. The timed runtime excludes data loading and setup and includes held-out evaluation and checkpoint saving.
-
-Use a dataset with generation timings. Set `train_positions`, then calibrate `optimizer_steps` to fit the remaining budget. Rerun candidates whose reported budget differs from the target by more than 5%, adjusting the step count. Keep the same target after promoting a candidate.
+Every training run is subject to a budget of 30min. It is defined as the time to train the model + 0.3 times the time required to generate the data that went into training the model. The budget used is reported by `mise run train`. Held-out data is excluded from the calculation. The timed runtime excludes data loading and setup and includes held-out evaluation and checkpoint saving. In order to compare apples to apples, keep all training runs within 5% of the budget.
 
 ## Sweeps
 
-Treat a sweep as one experiment. Train all variants from the same baseline recipe and select only the most promising candidate for the match.
+Treat a sweep as one experiment. Start all variants from the same baseline settings and select only the most promising candidate for the match.
+
+## Experiment Types
+
+Note: an experiment might fit into multiple categories.
+
+### Data experiments
+
+Data generation experiments are experiments that seek to improve the data generation process. If the experiment is successful, updates should be made to datagen.toml and the dataset field in training.toml. If the new data results in a change in the training budget, adjust hyperparameters to keep the training budget constant.
+
+### Training speedup/slowdowns
+
+This includes changes to the model architecture or to training kernels. The budget saved needs to be spent in other hyperparameters to stay close to the budget.
+
+### Inference speedup/slowdown
+
+This includes changes to the model architecture or to inference kernels. The evaluator benchmarks both models and scales candidate visits up or down relative to the baseline. For an inference-only change, reuse the baseline checkpoint when possible and verify that each side uses its intended inference path. A candidate model can win despite not having as low of a validation loss as the baseline.
+
+### Speed-neutral changes
+
+This includes changes to hyperparameters such as learning rate, initialization scheme. Validation loss might be a useful early indicator of whether it's even worth it to run the full SPRT test.
 
 ## Evaluation
 
@@ -27,25 +45,15 @@ Choose one SPRT mode before running the baseline match, based on the experiment'
 
 Use `gainer` for experiments that aim to improve playing strength under a fixed training and inference budget.
 
-* Model architecture improvements
-* Model training recipe improvements
-* Lower training cost, which lets the model take more optimizer steps within the same training budget.
-* Lower inference cost, the SPRT match will automatically assign more visits to the faster candidate, which should result in increased playing strength.
-
 ```sh
 mise run eval-model -- gainer "$candidate_dir"
 ```
 
-Use `non-regression` when the goal is to simplify the codebase, model, or training recipe while preserving playing strength.
-
-* Codebase simplifications
-* Ablations that simplify the model architecture
-* Ablations that remove the need for a hyperparameter
+Use `non-regression` when the goal is simplification, such as model ablations or code simplification.
 
 ```sh
 mise run eval-model -- non-regression "$candidate_dir"
 ```
-
 
 Update the baseline after a successful experiment.
 
