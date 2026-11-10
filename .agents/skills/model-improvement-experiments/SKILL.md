@@ -5,7 +5,7 @@ description: Plan, run, and interpret Chess Engine 5 experiments on training dat
 
 # Scope
 
-This skill covers data generation and labeling, data selection and sampling, model architecture, training recipes, and model inference. Engine and search changes are out of scope.
+This skill covers data generation and labeling, data selection and sampling, model architecture, training recipes, and model inference. Engine and search changes are out of scope. All experiments should compare a candidate against the baseline with the goal of getting a measurable Elo gain.
 
 ## Multiple experiments
 
