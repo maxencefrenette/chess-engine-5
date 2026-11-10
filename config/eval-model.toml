@@ -1,4 +1,4 @@
-baseline_dir = "/data/chess/chess-engine-5/models/training-recipe-experiments.VioD2w/one-layer"
+baseline_dir = "/data/chess/chess-engine-5/models/twenty-minute-baseline.K6HSia/checkpoint"
 device = "cuda"
 batch = 64
 leaves_per_game = 4
