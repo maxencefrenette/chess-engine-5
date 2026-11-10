@@ -27,6 +27,10 @@ Note: an experiment might fit into multiple categories.
 
 Data generation experiments are experiments that seek to improve the data generation process. If the experiment is successful, updates should be made to datagen.toml and the dataset field in training.toml. If the new data results in a change in the training budget, adjust hyperparameters to keep the training budget constant.
 
+### Training/datagen time tradeoffs
+
+If an experiment trades off datagen time budget for training time budget, report train time and datagen time for all arms of the experiment, otherwise do not report those values.
+
 ### Training speedup/slowdowns
 
 This includes changes to the model architecture or to training kernels. The budget saved needs to be spent in other hyperparameters to stay close to the budget.
