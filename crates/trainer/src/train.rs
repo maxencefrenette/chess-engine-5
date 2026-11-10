@@ -303,10 +303,7 @@ mod tests {
 
     #[test]
     fn policy_loss_reaches_smolgen() -> Result<()> {
-        let mut config = Config::from_file(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../config/training.toml"
-        ))?;
+        let mut config = Config::from_repo_file("training.toml")?;
         config.model.layers = 1;
         let device = &Device::Cpu;
         let params = VarMap::new();

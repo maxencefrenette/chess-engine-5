@@ -5,6 +5,13 @@ use serde::de::DeserializeOwned;
 use toml::{Table, Value};
 
 pub trait TomlConfig: DeserializeOwned {
+    fn from_repo_file(name: &str) -> Result<Self, Box<dyn Error>> {
+        Self::from_file(&format!(
+            "{}/../../config/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+    }
+
     fn from_file(path: &str) -> Result<Self, Box<dyn Error>> {
         Self::load(path, std::iter::empty())
     }

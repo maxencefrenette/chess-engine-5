@@ -284,10 +284,7 @@ mod tests {
 
     #[test]
     fn configured_baseline_checkpoint_loads_on_cpu() -> Result<(), Box<dyn std::error::Error>> {
-        let options = Options::from_file(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../config/eval-model.toml"
-        ))?;
+        let options = Options::from_repo_file("eval-model.toml")?;
         ModelEvaluator::load(&options.baseline_dir, chess_config::DeviceConfig::Cpu).map_err(
             |error| {
                 format!(

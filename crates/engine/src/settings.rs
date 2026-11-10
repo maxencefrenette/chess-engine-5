@@ -11,7 +11,7 @@ pub struct Settings {
 
 impl Settings {
     pub fn load() -> Result<Self, Box<dyn Error>> {
-        let settings: Self = Self::from_file("config/engine.toml")?;
+        let settings = Self::from_repo_file("engine.toml")?;
         for (key, value) in [
             ("exploration", f64::from(settings.exploration)),
             ("eval_temperature", settings.eval_temperature),
