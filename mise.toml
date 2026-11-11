@@ -30,7 +30,7 @@ run = "mise run with-cuda -- cargo run --release --locked -p chess-engine --feat
 
 [tasks.train]
 description = "Train a model using the training configuration"
-run = "mise run with-cuda -- cargo run --locked -p chess-trainer --features cuda --"
+run = "mise run with-cuda -- cargo run --release --locked -p chess-trainer --features cuda --"
 
 [tasks.datagen]
 description = "Generate self-play games and write Parquet shards"

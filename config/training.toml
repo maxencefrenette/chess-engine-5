@@ -6,7 +6,7 @@ value_sample_rate = 1.0
 
 [[curriculum]]
 dataset = "/data/chess/chess-engine-5/training-data/v2/1794345612350273851-1408899"
-num_positions = 250301
+num_positions = 290000
 epochs = 15.4147
 
 [optimizer]

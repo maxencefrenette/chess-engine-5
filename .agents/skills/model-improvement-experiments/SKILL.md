@@ -88,6 +88,8 @@ Required evidence:
 * A benchmark showing a speedup
 * A correctness comparison
 
+For a training speedup, reinvest the saved weighted budget in more unique training positions while keeping epochs fixed, targeting the same training budget. Evaluate the retrained checkpoint with `mise run eval-model -- non-regression "$candidate_dir"` before promoting it. This reinvestment belongs to the implementation experiment and does not require a gainer match. The implementation itself is accepted based on the benchmark and correctness comparison.
+
 ### Experimental measurement
 
 Changes how systems are measured or compared, including statistical tests, benchmarking, time matching, and budget definitions. These changes only require a theoretical justification as to why they're good for pursuing the goal of maximizing Elo gains per day. Add a new baseline if needed. Mention any relevant data that led to this decision.

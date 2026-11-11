@@ -1,6 +1,6 @@
-baseline_dir = "/data/chess/chess-engine-5/models/value-capacity-2026.11.10.Hzhknn/data-crank/refreshed-1"
+baseline_dir = "/data/chess/chess-engine-5/models/speedups-2026.11.10/rebudgeted"
 device = "cuda"
-batch = 64
+batch = 128
 leaves_per_game = 4
 baseline_visits_per_move = 800
 # Each pair plays two games with colors swapped.
