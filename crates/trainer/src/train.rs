@@ -439,8 +439,12 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use candle_nn::SGD;
     use chess_config::TomlConfig;
-    use chess_network::{INPUTS, SQUARES, value::ValueConfig};
+    use chess_network::{
+        INPUTS, SQUARES,
+        value::{PIECE_FEATURES, ValueConfig},
+    };
 
     use super::*;
 
@@ -529,6 +533,50 @@ mod tests {
             let grad = grads.get(params[name].as_tensor()).expect("value gradient");
             assert!(grad.abs()?.sum_all()?.to_scalar::<f32>()? > 0.0, "{name}");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn hybrid_wdl_loss_trains_both_branches() -> Result<()> {
+        let mut config = Config::from_repo_file("training.toml")?;
+        config.model.layers = 1;
+        config.model.value = ValueConfig::Hybrid {
+            piece_hidden: 16.try_into()?,
+            transformer_hidden: 16.try_into()?,
+        };
+        let device = &Device::Cpu;
+        let params = VarMap::new();
+        let net = Net::new(
+            VarBuilder::from_varmap(&params, DType::F32, device),
+            config.model,
+        )?;
+        let boards = Tensor::randn(0f32, 1., (2, SQUARES, INPUTS), device)?;
+        let moves = Tensor::zeros((2, 1), DType::U32, device)?;
+        let promotes = Tensor::zeros((2, 1), DType::F32, device)?;
+        let pieces = Tensor::ones((2, PIECE_FEATURES), DType::F32, device)?;
+        let labels = Tensor::new(&[0_u32, 2], device)?;
+        let (_, residual) = net.forward(&boards, &moves, &moves, &promotes, None)?;
+        assert_eq!(residual.unwrap().abs()?.sum_all()?.to_scalar::<f32>()?, 0.);
+
+        let objective = || -> candle_core::Result<Tensor> {
+            let (_, logits) = net.forward(&boards, &moves, &moves, &promotes, Some(&pieces))?;
+            loss::cross_entropy(&logits.expect("hybrid WDL logits"), &labels)
+        };
+        let assert_gradient =
+            |grads: &candle_core::backprop::GradStore, name: &str| -> Result<()> {
+                let params = params.data().lock().unwrap();
+                let grad = grads.get(params[name].as_tensor()).expect("WDL gradient");
+                assert!(grad.abs()?.sum_all()?.to_scalar::<f32>()? > 0.0, "{name}");
+                Ok(())
+            };
+        let before = objective()?;
+        let grads = before.backward()?;
+        assert_gradient(&grads, "piece_count_value.weight")?;
+        assert_gradient(&grads, "transformer_value.output.weight")?;
+        SGD::new(params.all_vars(), 0.1)?.backward_step(&before)?;
+        let grads = objective()?.backward()?;
+        assert_gradient(&grads, "transformer_value.hidden.weight")?;
+        assert_gradient(&grads, "input.weight")?;
         Ok(())
     }
 }

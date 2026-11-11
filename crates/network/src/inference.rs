@@ -55,7 +55,7 @@ impl InferenceModel {
             return Ok(Vec::new());
         }
         let mut features = Vec::with_capacity(size * SQUARES * INPUTS);
-        let mut values = Vec::with_capacity(size);
+        let mut value_logits = Vec::with_capacity(size);
         for (snapshot, black) in positions {
             encode_position(
                 &mut features,
@@ -68,7 +68,7 @@ impl InferenceModel {
             )
             .ok_or_else(|| io::Error::other("invalid piece code"))?;
             if let Some(value) = &self.piece_value {
-                values.push(value.evaluate(&snapshot.board, black));
+                value_logits.push(value.logits(&snapshot.board, black));
             }
         }
         let (policy, wdl) = PolicyInputs::new(features, moves.clone(), &self.device)
@@ -76,17 +76,27 @@ impl InferenceModel {
             .map_err(io::Error::other)?;
         let logits = policy.to_vec2::<f32>().map_err(io::Error::other)?;
         if let Some(wdl) = wdl {
-            values.extend(
-                wdl.to_vec2::<f32>()
-                    .map_err(io::Error::other)?
-                    .into_iter()
-                    .map(|logits| expected_value(logits.try_into().expect("three WDL logits"))),
-            );
+            for (index, row) in wdl
+                .to_vec2::<f32>()
+                .map_err(io::Error::other)?
+                .into_iter()
+                .enumerate()
+            {
+                let transformer: [f32; 3] = row.try_into().expect("three WDL logits");
+                if let Some(piece) = value_logits.get_mut(index) {
+                    for (logit, residual) in piece.iter_mut().zip(transformer) {
+                        *logit += residual;
+                    }
+                } else {
+                    value_logits.push(transformer);
+                }
+            }
         }
         moves
             .zip(logits)
-            .zip(values)
-            .map(|((moves, mut priors), value)| {
+            .zip(value_logits)
+            .map(|((moves, mut priors), wdl)| {
+                let value = expected_value(wdl);
                 priors.truncate(moves.len());
                 if priors.is_empty()
                     || !value.is_finite()

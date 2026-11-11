@@ -1,7 +1,7 @@
 use std::num::NonZeroUsize;
 
 use candle_core::{Device, Result, Tensor};
-use candle_nn::{Linear, Module, VarBuilder, linear};
+use candle_nn::{Init, Linear, Module, VarBuilder, linear};
 
 use crate::{ModelConfig, SQUARES};
 
@@ -18,6 +18,10 @@ pub enum ValueConfig {
         square_channels: NonZeroUsize,
         hidden: NonZeroUsize,
     },
+    Hybrid {
+        piece_hidden: NonZeroUsize,
+        transformer_hidden: NonZeroUsize,
+    },
 }
 
 impl ValueConfig {
@@ -26,48 +30,111 @@ impl ValueConfig {
     }
 }
 
-pub(crate) enum ValueHead {
-    Piece {
-        hidden: Option<Linear>,
-        output: Linear,
-    },
-    Transformer {
-        square: Linear,
-        hidden: Linear,
-        output: Linear,
-    },
+struct PieceHead {
+    hidden: Option<Linear>,
+    output: Linear,
+}
+
+impl PieceHead {
+    fn new(vb: VarBuilder, hidden: Option<NonZeroUsize>) -> Result<Self> {
+        let vb = vb.pp("piece_count_value");
+        Ok(Self {
+            hidden: hidden
+                .map(|width| linear(PIECE_FEATURES, width.get(), vb.pp("hidden")))
+                .transpose()?,
+            output: linear(hidden.map_or(PIECE_FEATURES, NonZeroUsize::get), 3, vb)?,
+        })
+    }
+
+    fn logits(&self, features: &Tensor) -> Result<Tensor> {
+        match &self.hidden {
+            Some(hidden) => self.output.forward(&hidden.forward(features)?.relu()?),
+            None => self.output.forward(features),
+        }
+    }
+}
+
+struct TransformerHead {
+    square: Option<Linear>,
+    hidden: Linear,
+    output: Linear,
+}
+
+impl TransformerHead {
+    fn new(
+        vb: VarBuilder,
+        width: usize,
+        square_channels: Option<NonZeroUsize>,
+        hidden: usize,
+    ) -> Result<Self> {
+        let vb = vb.pp("transformer_value");
+        let square = square_channels
+            .map(|channels| linear(width, channels.get(), vb.pp("square")))
+            .transpose()?;
+        let inputs = square_channels.map_or(width, |channels| SQUARES * channels.get());
+        let hidden_layer = linear(inputs, hidden, vb.pp("hidden"))?;
+        let output = vb.pp("output");
+        let output = if square.is_some() {
+            linear(hidden, 3, output)?
+        } else {
+            // Start the pooled correction at zero logits.
+            Linear::new(
+                output.get_with_hints((3, hidden), "weight", Init::Const(0.))?,
+                Some(output.get_with_hints(3, "bias", Init::Const(0.))?),
+            )
+        };
+        Ok(Self {
+            square,
+            hidden: hidden_layer,
+            output,
+        })
+    }
+
+    fn logits(&self, encoded: &Tensor) -> Result<Tensor> {
+        let board = match &self.square {
+            Some(square) => square.forward(encoded)?.relu()?.flatten_from(1)?,
+            None => encoded.mean(1)?,
+        };
+        self.output.forward(&self.hidden.forward(&board)?.relu()?)
+    }
+}
+
+pub(crate) struct ValueHead {
+    piece: Option<PieceHead>,
+    transformer: Option<TransformerHead>,
 }
 
 impl ValueHead {
     pub(crate) fn new(vb: VarBuilder, model: ModelConfig) -> Result<Self> {
-        Ok(match model.value {
-            ValueConfig::PieceLinear {} => Self::Piece {
-                hidden: None,
-                output: linear(PIECE_FEATURES, 3, vb.pp("piece_count_value"))?,
-            },
-            ValueConfig::PieceMlp { hidden } => {
-                let vb = vb.pp("piece_count_value");
-                Self::Piece {
-                    hidden: Some(linear(PIECE_FEATURES, hidden.get(), vb.pp("hidden"))?),
-                    output: linear(hidden.get(), 3, vb)?,
-                }
-            }
+        let (piece, transformer) = match model.value {
+            ValueConfig::PieceLinear {} => (Some(PieceHead::new(vb, None)?), None),
+            ValueConfig::PieceMlp { hidden } => (Some(PieceHead::new(vb, Some(hidden))?), None),
             ValueConfig::Transformer {
                 square_channels,
                 hidden,
-            } => {
-                let vb = vb.pp("transformer_value");
-                Self::Transformer {
-                    square: linear(model.width, square_channels.get(), vb.pp("square"))?,
-                    hidden: linear(
-                        SQUARES * square_channels.get(),
-                        hidden.get(),
-                        vb.pp("hidden"),
-                    )?,
-                    output: linear(hidden.get(), 3, vb.pp("output"))?,
-                }
-            }
-        })
+            } => (
+                None,
+                Some(TransformerHead::new(
+                    vb,
+                    model.width,
+                    Some(square_channels),
+                    hidden.get(),
+                )?),
+            ),
+            ValueConfig::Hybrid {
+                piece_hidden,
+                transformer_hidden,
+            } => (
+                Some(PieceHead::new(vb.clone(), Some(piece_hidden))?),
+                Some(TransformerHead::new(
+                    vb,
+                    model.width,
+                    None,
+                    transformer_hidden.get(),
+                )?),
+            ),
+        };
+        Ok(Self { piece, transformer })
     }
 
     pub(crate) fn logits(
@@ -75,32 +142,33 @@ impl ValueHead {
         encoded: &Tensor,
         pieces: Option<&Tensor>,
     ) -> Result<Option<Tensor>> {
-        match self {
-            Self::Piece { hidden, output } => pieces
-                .map(|features| match hidden {
-                    Some(hidden) => output.forward(&hidden.forward(features)?.relu()?),
-                    None => output.forward(features),
-                })
-                .transpose(),
-            Self::Transformer {
-                square,
-                hidden,
-                output,
-            } => {
-                let board = square.forward(encoded)?.relu()?.flatten_from(1)?;
-                Ok(Some(output.forward(&hidden.forward(&board)?.relu()?)?))
-            }
+        let piece = self
+            .piece
+            .as_ref()
+            .zip(pieces)
+            .map(|(head, features)| head.logits(features))
+            .transpose()?;
+        let transformer = self
+            .transformer
+            .as_ref()
+            .map(|head| head.logits(encoded))
+            .transpose()?;
+        match (piece, transformer) {
+            (Some(piece), Some(transformer)) => Ok(Some((&piece + &transformer)?)),
+            (piece, transformer) => Ok(piece.or(transformer)),
         }
     }
 
     pub(crate) fn cpu_piece_value(&self) -> Result<Option<CpuPieceValue>> {
-        match self {
-            Self::Piece { hidden, output } => Ok(Some(CpuPieceValue {
-                hidden: hidden.as_ref().map(CpuLinear::load).transpose()?,
-                output: CpuLinear::load(output)?,
-            })),
-            Self::Transformer { .. } => Ok(None),
-        }
+        self.piece
+            .as_ref()
+            .map(|head| {
+                Ok(CpuPieceValue {
+                    hidden: head.hidden.as_ref().map(CpuLinear::load).transpose()?,
+                    output: CpuLinear::load(&head.output)?,
+                })
+            })
+            .transpose()
     }
 }
 
@@ -140,7 +208,7 @@ pub(crate) struct CpuPieceValue {
 }
 
 impl CpuPieceValue {
-    pub(crate) fn evaluate(&self, board: &[u8; 32], black: bool) -> f32 {
+    pub(crate) fn logits(&self, board: &[u8; 32], black: bool) -> [f32; 3] {
         let pieces = piece_features(board, black);
         let mut logits = [0.; 3];
         if let Some(hidden) = &self.hidden {
@@ -153,7 +221,7 @@ impl CpuPieceValue {
         } else {
             self.output.forward(&pieces, &mut logits);
         }
-        expected_value(logits)
+        logits
     }
 }
 

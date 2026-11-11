@@ -1,4 +1,4 @@
-baseline_dir = "/data/chess/chess-engine-5/models/overnight-2026.11.10.Ky0bA8/03-piece-count-wdl-mlp/candidate-1"
+baseline_dir = "/data/chess/chess-engine-5/models/value-capacity-2026.11.10.Hzhknn/data-crank/refreshed-1"
 device = "cuda"
 batch = 64
 leaves_per_game = 4

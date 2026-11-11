@@ -5,7 +5,7 @@ seed = 42
 value_sample_rate = 1.0
 
 [[curriculum]]
-dataset = "/data/chess/chess-engine-5/training-data/v2/1794316173826234974-1165184"
+dataset = "/data/chess/chess-engine-5/training-data/v2/1794345612350273851-1408899"
 num_positions = 250301
 epochs = 15.4147
 
