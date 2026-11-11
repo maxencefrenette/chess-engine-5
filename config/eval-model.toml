@@ -1,4 +1,4 @@
-baseline_dir = "/data/chess/chess-engine-5/models/speedups-2026.11.10/rebudgeted"
+baseline_dir = "/data/chess/chess-engine-5/models/speedups-2026.11.10/bf16-benchmark/bf16"
 device = "cuda"
 batch = 128
 leaves_per_game = 4

@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fs, io, path::Path};
 
-use candle_core::{DType, Device, Tensor, safetensors};
+use candle_core::{Device, Tensor, safetensors};
 use candle_nn::VarBuilder;
 use serde::{Deserialize, Serialize};
 
@@ -43,7 +43,7 @@ impl Checkpoint {
 
     pub fn into_model(self, device: &Device) -> candle_core::Result<Net> {
         Net::new(
-            VarBuilder::from_tensors(self.tensors, DType::F32, device),
+            VarBuilder::from_tensors(self.tensors, self.model.inference_precision.dtype(), device),
             self.model,
         )
     }

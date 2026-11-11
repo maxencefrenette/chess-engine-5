@@ -1,6 +1,6 @@
 use std::{io, path::Path};
 
-use candle_core::Device;
+use candle_core::{DType, Device};
 use chess_config::DeviceConfig;
 use chess_data::Board;
 
@@ -74,10 +74,14 @@ impl InferenceModel {
         let (policy, wdl) = PolicyInputs::new(features, moves.clone(), &self.device)
             .and_then(|inputs| inputs.logits(&self.net, None))
             .map_err(io::Error::other)?;
-        let logits = policy.to_vec2::<f32>().map_err(io::Error::other)?;
+        let logits = policy
+            .to_dtype(DType::F32)
+            .and_then(|x| x.to_vec2::<f32>())
+            .map_err(io::Error::other)?;
         if let Some(wdl) = wdl {
             for (index, row) in wdl
-                .to_vec2::<f32>()
+                .to_dtype(DType::F32)
+                .and_then(|x| x.to_vec2::<f32>())
                 .map_err(io::Error::other)?
                 .into_iter()
                 .enumerate()

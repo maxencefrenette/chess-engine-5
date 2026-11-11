@@ -19,6 +19,7 @@ weight_decay = 0.01
 schedule = { mode = "constant" }
 
 [model]
+inference_precision = "bf16"
 width = 64
 heads = 4
 layers = 1

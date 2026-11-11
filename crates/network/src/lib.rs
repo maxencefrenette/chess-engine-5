@@ -15,6 +15,7 @@ pub const INPUTS: usize = 21;
 #[chess_config::toml_config]
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct ModelConfig {
+    pub inference_precision: InferencePrecision,
     pub width: usize,
     pub heads: usize,
     pub layers: usize,
@@ -22,6 +23,22 @@ pub struct ModelConfig {
     pub policy_width: usize,
     pub smolgen: SmolgenConfig,
     pub value: ValueConfig,
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InferencePrecision {
+    F32,
+    Bf16,
+}
+
+impl InferencePrecision {
+    fn dtype(self) -> candle_core::DType {
+        match self {
+            Self::F32 => candle_core::DType::F32,
+            Self::Bf16 => candle_core::DType::BF16,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
@@ -259,7 +276,8 @@ impl Net {
     }
 
     fn encode(&self, position: &Tensor) -> Result<Tensor> {
-        let mut x = self.input.forward(position)?.broadcast_add(&self.square)?;
+        let position = position.to_dtype(self.input.weight().dtype())?;
+        let mut x = self.input.forward(&position)?.broadcast_add(&self.square)?;
         for layer in &self.layers {
             x = layer.forward(&x, self.smolgen_projection.as_ref(), self.config)?;
         }
@@ -284,7 +302,7 @@ impl Net {
             .forward(&k)?
             .flatten_from(1)?
             .gather(promotion_index, 1)?;
-        &legal + (&offsets * promotes)?
+        &legal + (&offsets * promotes.to_dtype(offsets.dtype())?)?
     }
 }
 

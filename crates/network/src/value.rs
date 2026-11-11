@@ -37,7 +37,8 @@ struct PieceHead {
 
 impl PieceHead {
     fn new(vb: VarBuilder, hidden: Option<NonZeroUsize>) -> Result<Self> {
-        let vb = vb.pp("piece_count_value");
+        // This small head runs on the CPU during inference.
+        let vb = vb.pp("piece_count_value").to_dtype(candle_core::DType::F32);
         Ok(Self {
             hidden: hidden
                 .map(|width| linear(PIECE_FEATURES, width.get(), vb.pp("hidden")))
