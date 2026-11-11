@@ -13,7 +13,7 @@ Run experiments sequentially. Finish each experiment’s evaluation and promotio
 
 ## Training budget
 
-Every training run is subject to a budget of 30min. It is defined as the time to train the model + 0.3 times the time required to generate the data that went into training the model. The budget used is reported by `mise run train`. Held-out data is excluded from the calculation. The timed runtime excludes data loading and setup and includes held-out evaluation and checkpoint saving. In order to compare apples to apples, keep all training runs within 5% of the budget.
+Every training run is subject to a budget of 30min. It is defined as the time to train the model + 0.3 times the time required to generate the data that went into training the model. The budget used is reported by `mise run train`. Held-out data is excluded from the calculation. The timed runtime excludes data loading and setup and includes held-out evaluation and checkpoint saving. All arms of an experiment must be roughly budget-matched by being within 5% of the 30min budget.
 
 ## Sweeps
 
@@ -21,49 +21,84 @@ Treat a sweep as one experiment. Start all variants from the same baseline setti
 
 ## Experiment Types
 
-Note: an experiment might fit into multiple categories.
+Assign each experiment exactly one category based on its deliberate intervention. Speed and Elo changes are outcomes and do not determine the category. Supporting implementation work and budget reallocation follow the primary intervention.
 
-### Data experiments
+### Data generation
 
-Data generation experiments are experiments that seek to improve the data generation process. If the experiment is successful, updates should be made to datagen.toml and the dataset field in training.toml. If the new data results in a change in the training budget, adjust hyperparameters to keep the training budget constant.
+Changes how self-play trajectories and search labels are produced, including the teacher, search depth, and move sampling.
 
-### Training/datagen time tradeoffs
+Required evidence:
+* Train a new model with the new data
+* `mise run eval-model -- gainer "$candidate_dir"`
 
-If an experiment trades off datagen time budget for training time budget, report train time and datagen time for all arms of the experiment, otherwise do not report those values.
+### Training data usage
 
-### Training speedup/slowdowns
+Changes which existing examples supervise each output, or when and how often they are presented. This includes position selection, epochs, curriculum order, and target masking.
 
-This includes changes to the model architecture or to training kernels. The budget saved needs to be spent in other hyperparameters to stay close to the budget.
+Required evidence: `mise run eval-model -- gainer "$candidate_dir"`
 
-### Inference speedup/slowdown
+### Model architecture
 
-This includes changes to the model architecture or to inference kernels. The evaluator benchmarks both models and scales candidate visits up or down relative to the baseline. For an inference-only change, reuse the baseline checkpoint when possible and verify that each side uses its intended inference path. A candidate model can win despite not having as low of a validation loss as the baseline.
+Changes what the shape of the model, which impacts training and inference speed.
 
-### Speed-neutral changes
+Examples:
+* Model dimension
+* Number of layers
+* FFN width
+* Training at a lower precision data type
 
-This includes changes to hyperparameters such as learning rate, initialization scheme. Validation loss might be a useful early indicator of whether it's even worth it to run the full SPRT test.
+Required evidence: `mise run eval-model -- gainer "$candidate_dir"`
 
-## Evaluation
+### Model ablation
 
-Choose one SPRT mode before running the baseline match, based on the experiment's goal.
+Same as model architecture changes, but seeks to simplify the model architecture without losing Elo.
 
-Use `gainer` for experiments that aim to improve playing strength under a fixed training and inference budget.
+Examples:
+* Disabling smolgen
 
-```sh
-mise run eval-model -- gainer "$candidate_dir"
-```
+Required evidence: `mise run eval-model -- non-regression "$candidate_dir"`
 
-Use `non-regression` when the goal is simplification, such as model ablations or code simplification.
+### Learning rule
 
-```sh
-mise run eval-model -- non-regression "$candidate_dir"
-```
+Changes how predictions and targets produce parameter updates, including target definitions, objectives, optimizers, learning-rate schedules, batch size.
 
-Update the baseline after a successful experiment.
+Intermediate evidence: Held-out loss is a useful metric to determine if a candidate deserves a full SPRT test.
+Required evidence: `mise run eval-model -- gainer "$candidate_dir"`
 
-```sh
-mise run update-model -- "$candidate_dir"
-```
+### Inference approximation
+
+Changes how a trained model's predictions are approximated during play, including inference precision and approximate operators. The goal is that the extra positions evaluated benefit more that the loss of accuracy incured.
+
+Examples:
+* Using an inference kernel that slightly changes numerical outputs
+
+Require evidence: `mise run eval-model -- gainer "$candidate_dir"`
+
+### Search and playing behavior
+
+Changes how predictions become moves during play. Search behavior during data generation belongs to Data generation. This category covers search changes during evaluation or other play and is outside this skill's current scope.
+
+Out of scope for now since we don't have a good testing setup for this.
+
+### Behavior-preserving implementation
+
+Changes how the same computation is executed while preserving its intended results. This includes optimizations to training, inference, data generation, and match execution. A batching change belongs here only if it preserves each game's search behavior.
+
+Required evidence:
+* A benchmark showing a speedup
+* A correctness comparison
+
+### Experimental measurement
+
+Changes how systems are measured or compared, including statistical tests, benchmarking, time matching, and budget definitions. These changes only require a theoretical justification as to why they're good for pursuing the goal of maximizing Elo gains per day. Add a new baseline if needed. Mention any relevant data that led to this decision.
+
+### Combined intervention
+
+Deliberately combines two or more independent changes from Data generation through Search and playing behavior. Use this category only when the changes are separate experimental choices. Supporting code changes and adjustments needed to match the budget do not make an experiment combined. Reuse checkpoint weights for inference-only experiments when possible and verify that each side uses its intended inference path. Use your judgement to determine what evidence is required for a candidate to replace the baseline.
+
+## Updates
+
+After a successful baseline match, set `baseline_dir` in `config/eval-model.toml` to the candidate checkpoint directory. Carry forward winning settings in `config/training.toml` and `config/datagen.toml` where applicable.
 
 ## Report
 

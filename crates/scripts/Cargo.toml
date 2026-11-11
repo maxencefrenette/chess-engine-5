@@ -1,8 +1,0 @@
-[package]
-name = "chess-scripts"
-version = "0.1.0"
-edition.workspace = true
-
-[dependencies]
-tempfile = "3"
-toml_edit = "0.23"

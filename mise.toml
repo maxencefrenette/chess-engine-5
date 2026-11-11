@@ -32,10 +32,6 @@ run = "mise run with-cuda -- cargo run --release --locked -p chess-engine --feat
 description = "Train a model using the training configuration"
 run = "mise run with-cuda -- cargo run --locked -p chess-trainer --features cuda --"
 
-[tasks.update-model]
-description = "Set the model evaluation baseline to a checkpoint directory"
-run = "cargo run --locked -p chess-scripts -- update-model"
-
 [tasks.datagen]
 description = "Generate self-play games and write Parquet shards"
 run = "mise run with-cuda -- cargo run --release --locked -p chess-engine --features cuda -- self-play"
