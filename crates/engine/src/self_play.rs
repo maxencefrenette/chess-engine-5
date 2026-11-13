@@ -6,13 +6,14 @@ use std::{
 };
 
 use chess_data::{FORMAT_VERSION, Position, Result, write_shard};
+use chess_network::inference::Prediction;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde_json::json;
 
 use crate::{
     chess::{Color, Game, Outcome},
-    mcts::Search,
+    mcts::{Leaf, Search},
     model_evaluator::ModelEvaluator,
     settings::Settings,
 };
@@ -25,6 +26,7 @@ pub struct Config {
     total_games: NonZeroUsize,
     games_per_shard: NonZeroUsize,
     batch: NonZeroUsize,
+    leaves_per_game: NonZeroUsize,
     visits_per_move: NonZeroU16,
     seed: u64,
     temperature: f64,
@@ -104,11 +106,11 @@ impl ActiveGame {
     }
 }
 
-fn play_batch(
-    model: &ModelEvaluator,
+fn play_games(
     settings: &Settings,
     config: &Config,
-    ids: std::ops::Range<usize>,
+    mut ids: std::ops::Range<usize>,
+    mut evaluate: impl FnMut(&[(usize, Leaf)]) -> std::io::Result<Vec<Prediction>>,
 ) -> Result<Vec<(usize, PlayedGame)>> {
     let (fast_visits, full_search_rate) = match config.playout_cap {
         PlayoutCap::Disabled {} => (config.visits_per_move, 1.0),
@@ -117,10 +119,12 @@ fn play_batch(
             full_search_rate,
         } => (fast_visits, full_search_rate),
     };
+    let mut completed = Vec::with_capacity(ids.len());
     let mut active: Vec<_> = ids
+        .by_ref()
+        .take(config.batch.get())
         .map(|id| ActiveGame::new(config.seed, id, full_search_rate))
         .collect();
-    let mut completed = Vec::with_capacity(active.len());
     while !active.is_empty() {
         let mut pending = Vec::new();
         let mut finished = Vec::new();
@@ -130,12 +134,20 @@ fn play_batch(
             } else {
                 fast_visits
             };
-            if let Some(leaf) =
-                slot.search
-                    .next_leaf(&slot.game, NonZeroU32::from(visits), settings.exploration)
-            {
+            let before = pending.len();
+            for _ in 0..config.leaves_per_game.get() {
+                let Some(leaf) = slot.search.next_leaf(
+                    &slot.game,
+                    NonZeroU32::from(visits),
+                    settings.exploration,
+                ) else {
+                    break;
+                };
                 pending.push((i, leaf));
-            } else if let Some(outcome) = slot.play(config.temperature, full_search_rate) {
+            }
+            if pending.len() == before
+                && let Some(outcome) = slot.play(config.temperature, full_search_rate)
+            {
                 let white_value = match outcome {
                     Outcome::Win(Color::White) => 1,
                     Outcome::Win(Color::Black) => -1,
@@ -144,14 +156,21 @@ fn play_batch(
                 finished.push((i, white_value));
             }
         }
-        let evaluations = model.evaluate(&pending)?;
+        let evaluations = evaluate(&pending)?;
         for ((i, leaf), result) in pending.into_iter().zip(evaluations) {
             active[i]
                 .search
                 .evaluate(leaf, result.value, &result.priors);
         }
         for (i, white_value) in finished.into_iter().rev() {
-            let slot = active.swap_remove(i);
+            let slot = if let Some(id) = ids.next() {
+                std::mem::replace(
+                    &mut active[i],
+                    ActiveGame::new(config.seed, id, full_search_rate),
+                )
+            } else {
+                active.swap_remove(i)
+            };
             completed.push((
                 slot.id,
                 PlayedGame {
@@ -197,11 +216,9 @@ pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) ->
     for start in (0..total_games).step_by(games_per_shard) {
         let end = start.saturating_add(games_per_shard).min(total_games);
         let started = Instant::now();
-        let mut games = Vec::with_capacity(end - start);
-        for batch_start in (start..end).step_by(config.batch.get()) {
-            let batch_end = batch_start.saturating_add(config.batch.get()).min(end);
-            games.extend(play_batch(model, settings, config, batch_start..batch_end)?);
-        }
+        let games = play_games(settings, config, start..end, |pending| {
+            model.evaluate(pending)
+        })?;
         let elapsed = started.elapsed();
         let shard_positions: usize = games.iter().map(|(_, game)| game.positions.len()).sum();
         if shard_positions == 0 {
@@ -250,6 +267,7 @@ pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) ->
         "checkpoint": model.model_dir,
         "device": config.device,
         "game_batch": config.batch.get(),
+        "leaves_per_game": config.leaves_per_game.get(),
         "sampling": "chacha8-stream-per-game; temperature applied to root visits",
         "temperature": config.temperature,
         "exploration": settings.exploration,
@@ -258,4 +276,66 @@ pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) ->
     fs::write(&partial, format!("{manifest:#}\n"))?;
     fs::rename(partial, run.join("manifest.json"))?;
     Ok(run)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chess_config::TomlConfig;
+
+    #[test]
+    fn refilling_preserves_seeded_games_and_ids() -> Result<()> {
+        let mut config = Config::from_repo_file("datagen.toml")?;
+        config.visits_per_move = NonZeroU16::new(4).unwrap();
+        let settings = Settings::load()?;
+        for cap in [
+            PlayoutCap::Disabled {},
+            PlayoutCap::Enabled {
+                fast_visits: NonZeroU16::new(1).unwrap(),
+                full_search_rate: 0.5,
+            },
+        ] {
+            config.playout_cap = cap;
+            let run = |config: &Config| {
+                play_games(&settings, config, 5..12, |pending| {
+                    Ok(pending
+                        .iter()
+                        .map(|(_, leaf)| Prediction {
+                            value: 0.0,
+                            priors: vec![1.0 / leaf.moves.len() as f32; leaf.moves.len()],
+                        })
+                        .collect())
+                })
+            };
+            config.batch = NonZeroUsize::new(1).unwrap();
+            let expected = run(&config)?;
+            for (_, game) in &expected {
+                for position in &game.positions {
+                    assert_eq!(
+                        position
+                            .policy
+                            .iter()
+                            .map(|(_, visits)| u32::from(*visits))
+                            .sum::<u32>(),
+                        u32::from(config.visits_per_move.get()),
+                    );
+                }
+            }
+            assert_eq!(
+                expected.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                (5..12).collect::<Vec<_>>()
+            );
+            for batch in [2, 3, 10] {
+                config.batch = NonZeroUsize::new(batch).unwrap();
+                let actual = run(&config)?;
+                assert_eq!(actual.len(), expected.len());
+                for ((id, game), (expected_id, expected_game)) in actual.iter().zip(&expected) {
+                    assert_eq!(id, expected_id);
+                    assert_eq!(game.white_value, expected_game.white_value);
+                    assert_eq!(game.positions, expected_game.positions);
+                }
+            }
+        }
+        Ok(())
+    }
 }
