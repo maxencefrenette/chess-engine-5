@@ -2,7 +2,8 @@ output_dir = "/data/chess/chess-engine-5/models/smolgen-experiment"
 device = "cuda"
 batch_size = 128
 seed = 42
-value_sample_rate = 1.0
+value_sample_rate = 0.125
+value_loss_weight = 0.03
 
 [[curriculum]]
 dataset = "/data/chess/chess-engine-5/training-data/v2/bf16-refresh-2026.11.11"
@@ -25,7 +26,7 @@ heads = 4
 layers = 1
 ffn_width = 128
 policy_width = 32
-value = { kind = "piece_mlp", hidden = 16 }
+value = { kind = "pooled", hidden = 16 }
 
 [model.smolgen]
 mode = "enabled"

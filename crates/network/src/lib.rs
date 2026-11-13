@@ -8,7 +8,7 @@ use candle_nn::{
     Init, LayerNorm, Linear, Module, VarBuilder, layer_norm, linear, linear_no_bias,
     ops::{layer_norm_slow, softmax, softmax_last_dim},
 };
-use value::{CpuPieceValue, ValueConfig, ValueHead};
+use value::{ValueConfig, ValueHead};
 
 pub const SQUARES: usize = 64;
 pub const INPUTS: usize = 21;
@@ -257,21 +257,16 @@ impl Net {
         })
     }
 
-    pub(crate) fn cpu_piece_value(&self) -> Result<Option<CpuPieceValue>> {
-        self.value.cpu_piece_value()
-    }
-
     pub fn forward(
         &self,
         position: &Tensor,
         move_index: &Tensor,
         promotion_index: &Tensor,
         promotes: &Tensor,
-        pieces: Option<&Tensor>,
-    ) -> Result<(Tensor, Option<Tensor>)> {
+    ) -> Result<(Tensor, Tensor)> {
         let encoded = self.encode(position)?;
         let policy = self.legal_policy(&encoded, move_index, promotion_index, promotes)?;
-        let wdl = self.value.logits(&encoded, pieces)?;
+        let wdl = self.value.logits(&encoded)?;
         Ok((policy, wdl))
     }
 

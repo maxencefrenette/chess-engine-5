@@ -49,7 +49,7 @@ impl Checkpoint {
     }
 }
 
-/// Save a policy and its playing value model together. Publish config last.
+/// Save network weights and training settings. Publish config last.
 pub fn save(
     directory: &Path,
     tensors: HashMap<String, Tensor>,

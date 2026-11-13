@@ -9,7 +9,7 @@ use crate::{
     checkpoint::Checkpoint,
     encode_position,
     policy_inputs::PolicyInputs,
-    value::{CpuPieceValue, ValueConfig, expected_value},
+    value::{ValueConfig, expected_value},
 };
 
 pub struct Prediction {
@@ -19,7 +19,6 @@ pub struct Prediction {
 
 pub struct InferenceModel {
     net: Net,
-    piece_value: Option<CpuPieceValue>,
     device: Device,
 }
 
@@ -28,12 +27,7 @@ impl InferenceModel {
         let device = device.try_into().map_err(io::Error::other)?;
         let checkpoint = Checkpoint::load(model_dir, &device)?;
         let net = checkpoint.into_model(&device).map_err(io::Error::other)?;
-        let piece_value = net.cpu_piece_value().map_err(io::Error::other)?;
-        Ok(Self {
-            net,
-            piece_value,
-            device,
-        })
+        Ok(Self { net, device })
     }
 
     pub fn value_config(&self) -> ValueConfig {
@@ -55,7 +49,6 @@ impl InferenceModel {
             return Ok(Vec::new());
         }
         let mut features = Vec::with_capacity(size * SQUARES * INPUTS);
-        let mut value_logits = Vec::with_capacity(size);
         for (snapshot, black) in positions {
             encode_position(
                 &mut features,
@@ -67,40 +60,23 @@ impl InferenceModel {
                 snapshot.repetitions,
             )
             .ok_or_else(|| io::Error::other("invalid piece code"))?;
-            if let Some(value) = &self.piece_value {
-                value_logits.push(value.logits(&snapshot.board, black));
-            }
         }
         let (policy, wdl) = PolicyInputs::new(features, moves.clone(), &self.device)
-            .and_then(|inputs| inputs.logits(&self.net, None))
+            .and_then(|inputs| inputs.logits(&self.net))
             .map_err(io::Error::other)?;
         let logits = policy
             .to_dtype(DType::F32)
             .and_then(|x| x.to_vec2::<f32>())
             .map_err(io::Error::other)?;
-        if let Some(wdl) = wdl {
-            for (index, row) in wdl
-                .to_dtype(DType::F32)
-                .and_then(|x| x.to_vec2::<f32>())
-                .map_err(io::Error::other)?
-                .into_iter()
-                .enumerate()
-            {
-                let transformer: [f32; 3] = row.try_into().expect("three WDL logits");
-                if let Some(piece) = value_logits.get_mut(index) {
-                    for (logit, residual) in piece.iter_mut().zip(transformer) {
-                        *logit += residual;
-                    }
-                } else {
-                    value_logits.push(transformer);
-                }
-            }
-        }
+        let value_logits = wdl
+            .to_dtype(DType::F32)
+            .and_then(|x| x.to_vec2::<f32>())
+            .map_err(io::Error::other)?;
         moves
             .zip(logits)
             .zip(value_logits)
             .map(|((moves, mut priors), wdl)| {
-                let value = expected_value(wdl);
+                let value = expected_value(wdl.try_into().expect("three WDL logits"));
                 priors.truncate(moves.len());
                 if priors.is_empty()
                     || !value.is_finite()

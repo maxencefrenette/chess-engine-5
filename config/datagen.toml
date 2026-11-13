@@ -1,4 +1,4 @@
-model = "/data/chess/chess-engine-5/models/bf16-data-2026.11.11/candidate"
+model = "/data/chess/chess-engine-5/models/transformer-value-2026.11.12/pooled-more-labels"
 output_dir = "/data/chess/chess-engine-5/training-data"
 device = "cuda"
 total_games = 2000

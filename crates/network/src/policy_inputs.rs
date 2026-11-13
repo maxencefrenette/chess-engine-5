@@ -39,13 +39,12 @@ impl PolicyInputs {
         self.moves.dims()[1]
     }
 
-    pub fn logits(&self, net: &Net, pieces: Option<&Tensor>) -> Result<(Tensor, Option<Tensor>)> {
+    pub fn logits(&self, net: &Net) -> Result<(Tensor, Tensor)> {
         net.forward(
             &self.positions,
             &self.moves,
             &self.promotions,
             &self.promotes,
-            pieces,
         )
     }
 }

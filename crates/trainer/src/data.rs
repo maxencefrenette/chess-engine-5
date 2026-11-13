@@ -10,11 +10,7 @@ use chess_data::{discover_shards, read_shard};
 use rand::{SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha8Rng;
 
-use chess_network::{
-    INPUTS, SQUARES, encode_position,
-    policy_inputs::PolicyInputs,
-    value::{PIECE_FEATURES, feature_tensor, piece_features},
-};
+use chess_network::{INPUTS, SQUARES, encode_position, policy_inputs::PolicyInputs};
 
 pub struct Row {
     features: Vec<f32>,
@@ -22,7 +18,6 @@ pub struct Row {
     total_visits: f32,
     pub value: u32,
     use_value: bool,
-    piece_features: [f32; PIECE_FEATURES],
 }
 
 pub struct Dataset {
@@ -151,7 +146,6 @@ fn encode_row(row: chess_data::Row, use_value: bool) -> Result<Row> {
         moves: row.position.policy,
         value: (row.value + 1) as u32,
         use_value,
-        piece_features: piece_features(board, black_to_move),
     })
 }
 
@@ -162,17 +156,11 @@ pub struct Batch {
     pub value: Option<Tensor>,
     pub value_indices: Option<Tensor>,
     pub value_count: usize,
-    pub piece_features: Option<Tensor>,
     pub uniform_loss: f64,
 }
 
 impl Batch {
-    pub fn new(
-        rows: &[Row],
-        indices: &[usize],
-        device: &Device,
-        uses_piece_counts: bool,
-    ) -> candle_core::Result<Self> {
+    pub fn new(rows: &[Row], indices: &[usize], device: &Device) -> candle_core::Result<Self> {
         let size = indices.len();
         let mut positions = Vec::with_capacity(size * SQUARES * INPUTS);
         for &i in indices {
@@ -216,17 +204,6 @@ impl Batch {
                 None
             },
             value_count,
-            piece_features: if uses_piece_counts {
-                Some(feature_tensor(
-                    &indices
-                        .iter()
-                        .map(|&i| rows[i].piece_features)
-                        .collect::<Vec<_>>(),
-                    device,
-                )?)
-            } else {
-                None
-            },
             uniform_loss,
         })
     }

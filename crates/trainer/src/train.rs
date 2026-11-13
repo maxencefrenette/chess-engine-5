@@ -31,6 +31,7 @@ pub struct Config {
     optimizer: OptimizerConfig,
     seed: u64,
     value_sample_rate: f64,
+    value_loss_weight: f64,
     curriculum: Vec<CurriculumStep>,
     model: ModelConfig,
 }
@@ -105,11 +106,10 @@ impl Schedule {
 }
 
 fn losses(net: &Net, batch: &Batch) -> candle_core::Result<[Tensor; 2]> {
-    let (policy, wdl) = batch.inputs.logits(net, batch.piece_features.as_ref())?;
+    let (policy, wdl) = batch.inputs.logits(net)?;
     let log_probs = log_softmax(&(&policy + &batch.mask)?, 1)?;
     let policy = (&log_probs * &batch.policy)?.sum(1)?.neg()?.mean_all()?;
     let value = if let Some(targets) = &batch.value {
-        let wdl = wdl.expect("training batch supplies value inputs");
         let wdl = match &batch.value_indices {
             Some(indices) => wdl.index_select(indices, 0)?,
             None => wdl,
@@ -128,18 +128,21 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         ref optimizer,
         seed,
         value_sample_rate,
+        value_loss_weight,
         ref curriculum,
         model,
         ..
     } = config;
     let OptimizerConfig::Adamw(adamw) = optimizer;
-    let uses_piece_counts = model.value.uses_piece_counts();
     let batch_size = batch_size.get();
     if curriculum.is_empty() {
         return Err("curriculum must contain at least one phase".into());
     }
     if !(value_sample_rate > 0.0 && value_sample_rate <= 1.0) {
         return Err("value_sample_rate must be in (0, 1]".into());
+    }
+    if !value_loss_weight.is_finite() || value_loss_weight <= 0.0 {
+        return Err("value_loss_weight must be positive and finite".into());
     }
     if !adamw.learning_rate.is_finite() || adamw.learning_rate <= 0. {
         return Err("training optimizer.learning_rate must be positive and finite".into());
@@ -255,9 +258,9 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
             let mut epoch_positions = 0;
             let mut epoch_values = 0;
             for chunk in indices.chunks(batch_size).take(end_step - optimizer_steps) {
-                let batch = Batch::new(rows, chunk, device, uses_piece_counts)?;
+                let batch = Batch::new(rows, chunk, device)?;
                 let [policy, value] = losses(&net, &batch)?;
-                let objective = (&policy + &value)?;
+                let objective = (&policy + (&value * value_loss_weight)?)?;
                 let lr =
                     adamw.learning_rate * adamw.schedule.multiplier(optimizer_steps, planned_steps);
                 optimizer.set_learning_rate(lr);
@@ -348,7 +351,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     let mut value_baseline = 0.;
     let indices: Vec<_> = (0..held_out.test.len()).collect();
     for chunk in indices.chunks(batch_size) {
-        let batch = Batch::new(&held_out.test, chunk, device, uses_piece_counts)?;
+        let batch = Batch::new(&held_out.test, chunk, device)?;
         for (total, loss) in totals.iter_mut().zip(losses(&net, &batch)?) {
             *total += f64::from(loss.to_scalar::<f32>()?) * chunk.len() as f64;
         }
@@ -441,10 +444,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
 mod tests {
     use candle_nn::SGD;
     use chess_config::TomlConfig;
-    use chess_network::{
-        INPUTS, SQUARES,
-        value::{PIECE_FEATURES, ValueConfig},
-    };
+    use chess_network::{INPUTS, SQUARES};
 
     use super::*;
 
@@ -491,7 +491,7 @@ mod tests {
         let board = Tensor::randn(0f32, 1., (1, SQUARES, INPUTS), device)?;
         let moves = Tensor::zeros((1, 1), DType::U32, device)?;
         let promotes = Tensor::zeros((1, 1), DType::F32, device)?;
-        let (policy, _) = net.forward(&board, &moves, &moves, &promotes, None)?;
+        let (policy, _) = net.forward(&board, &moves, &moves, &promotes)?;
         let grads = policy.sum_all()?.backward()?;
         let params = params.data().lock().unwrap();
         for name in [
@@ -511,10 +511,6 @@ mod tests {
     fn transformer_wdl_loss_reaches_the_shared_trunk() -> Result<()> {
         let mut config = Config::from_repo_file("training.toml")?;
         config.model.layers = 1;
-        config.model.value = ValueConfig::Transformer {
-            square_channels: 8.try_into()?,
-            hidden: 32.try_into()?,
-        };
         let device = &Device::Cpu;
         let params = VarMap::new();
         let net = Net::new(
@@ -524,59 +520,24 @@ mod tests {
         let boards = Tensor::randn(0f32, 1., (2, SQUARES, INPUTS), device)?;
         let moves = Tensor::zeros((2, 1), DType::U32, device)?;
         let promotes = Tensor::zeros((2, 1), DType::F32, device)?;
-        let (_, wdl) = net.forward(&boards, &moves, &moves, &promotes, None)?;
         let labels = Tensor::new(&[0_u32, 2], device)?;
-        let grads =
-            loss::cross_entropy(&wdl.expect("transformer WDL logits"), &labels)?.backward()?;
+        let objective = || -> candle_core::Result<Tensor> {
+            let (_, wdl) = net.forward(&boards, &moves, &moves, &promotes)?;
+            loss::cross_entropy(&wdl, &labels)
+        };
+        // Zero output initialization needs one update before trunk gradients flow.
+        SGD::new(params.all_vars(), 0.1)?.backward_step(&objective()?)?;
+        let grads = objective()?.backward()?;
         let params = params.data().lock().unwrap();
+        assert!(
+            params
+                .keys()
+                .all(|name| !name.starts_with("piece_count_value"))
+        );
         for name in ["input.weight", "transformer_value.output.weight"] {
             let grad = grads.get(params[name].as_tensor()).expect("value gradient");
             assert!(grad.abs()?.sum_all()?.to_scalar::<f32>()? > 0.0, "{name}");
         }
-        Ok(())
-    }
-
-    #[test]
-    fn hybrid_wdl_loss_trains_both_branches() -> Result<()> {
-        let mut config = Config::from_repo_file("training.toml")?;
-        config.model.layers = 1;
-        config.model.value = ValueConfig::Hybrid {
-            piece_hidden: 16.try_into()?,
-            transformer_hidden: 16.try_into()?,
-        };
-        let device = &Device::Cpu;
-        let params = VarMap::new();
-        let net = Net::new(
-            VarBuilder::from_varmap(&params, DType::F32, device),
-            config.model,
-        )?;
-        let boards = Tensor::randn(0f32, 1., (2, SQUARES, INPUTS), device)?;
-        let moves = Tensor::zeros((2, 1), DType::U32, device)?;
-        let promotes = Tensor::zeros((2, 1), DType::F32, device)?;
-        let pieces = Tensor::ones((2, PIECE_FEATURES), DType::F32, device)?;
-        let labels = Tensor::new(&[0_u32, 2], device)?;
-        let (_, residual) = net.forward(&boards, &moves, &moves, &promotes, None)?;
-        assert_eq!(residual.unwrap().abs()?.sum_all()?.to_scalar::<f32>()?, 0.);
-
-        let objective = || -> candle_core::Result<Tensor> {
-            let (_, logits) = net.forward(&boards, &moves, &moves, &promotes, Some(&pieces))?;
-            loss::cross_entropy(&logits.expect("hybrid WDL logits"), &labels)
-        };
-        let assert_gradient =
-            |grads: &candle_core::backprop::GradStore, name: &str| -> Result<()> {
-                let params = params.data().lock().unwrap();
-                let grad = grads.get(params[name].as_tensor()).expect("WDL gradient");
-                assert!(grad.abs()?.sum_all()?.to_scalar::<f32>()? > 0.0, "{name}");
-                Ok(())
-            };
-        let before = objective()?;
-        let grads = before.backward()?;
-        assert_gradient(&grads, "piece_count_value.weight")?;
-        assert_gradient(&grads, "transformer_value.output.weight")?;
-        SGD::new(params.all_vars(), 0.1)?.backward_step(&before)?;
-        let grads = objective()?.backward()?;
-        assert_gradient(&grads, "transformer_value.hidden.weight")?;
-        assert_gradient(&grads, "input.weight")?;
         Ok(())
     }
 }
