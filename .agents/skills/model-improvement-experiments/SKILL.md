@@ -29,13 +29,13 @@ Changes how self-play trajectories and search labels are produced, including the
 
 Required evidence:
 * Train a new model with the new data
-* `mise run eval-model -- gainer "$candidate_dir"`
+* `mise run eval-model -- gainer --matched-speed "$candidate_dir"`
 
 ### Training data usage
 
 Changes which existing examples supervise each output, or when and how often they are presented. This includes position selection, epochs, curriculum order, and target masking.
 
-Required evidence: `mise run eval-model -- gainer "$candidate_dir"`
+Required evidence: `mise run eval-model -- gainer --matched-speed "$candidate_dir"`
 
 ### Model architecture
 
@@ -63,7 +63,7 @@ Required evidence: `mise run eval-model -- non-regression "$candidate_dir"`
 Changes how predictions and targets produce parameter updates, including target definitions, objectives, optimizers, learning-rate schedules, batch size.
 
 Intermediate evidence: Held-out loss is a useful metric to determine if a candidate deserves a full SPRT test.
-Required evidence: `mise run eval-model -- gainer "$candidate_dir"`
+Required evidence: `mise run eval-model -- gainer --matched-speed "$candidate_dir"`
 
 ### Inference approximation
 
@@ -87,8 +87,6 @@ Changes how the same computation is executed while preserving its intended resul
 Required evidence:
 * A benchmark showing a speedup
 * A correctness comparison
-
-For a training speedup, reinvest the saved weighted budget in more unique training positions while keeping epochs fixed, targeting the same training budget. Evaluate the retrained checkpoint with `mise run eval-model -- non-regression "$candidate_dir"` before promoting it. This reinvestment belongs to the implementation experiment and does not require a gainer match. The implementation itself is accepted based on the benchmark and correctness comparison.
 
 ### Experimental measurement
 

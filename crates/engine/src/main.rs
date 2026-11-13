@@ -12,7 +12,7 @@ use chess_engine::{
 const USAGE: &str = "usage: chess-engine [--cuda] <command>
   search MODEL_DIR VISITS [MOVE ...]
   self-play [--config PATH] [--set KEY=VALUE]...
-  eval-model <gainer|non-regression|fixed> CANDIDATE_DIR [--config PATH] [--set KEY=VALUE]...";
+  eval-model <gainer|non-regression|fixed> CANDIDATE_DIR [--matched-speed] [--config PATH] [--set KEY=VALUE]...";
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
@@ -33,7 +33,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .next()
             .filter(|arg| !arg.starts_with("--"))
             .ok_or(USAGE)?;
-        let options = Options::load("config/eval-model.toml", args)?;
+        let (options, matched_speed) = eval_options(args)?;
         let settings = Settings::load()?;
         let baseline = ModelEvaluator::load(&options.baseline_dir, options.device)?;
         let candidate = ModelEvaluator::load(Path::new(&candidate_dir), options.device)?;
@@ -46,6 +46,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(matches::run(
             options,
             mode,
+            matched_speed,
             [&baseline, &candidate],
             &settings,
         )?);
@@ -88,6 +89,31 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn eval_options(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(Options, bool), Box<dyn std::error::Error>> {
+    let mut matched_speed = false;
+    let mut config_args = Vec::new();
+    while let Some(arg) = args.next() {
+        if arg == "--matched-speed" {
+            if matched_speed {
+                return Err("--matched-speed specified twice".into());
+            }
+            matched_speed = true;
+        } else {
+            let takes_value = matches!(arg.as_str(), "--config" | "--set");
+            config_args.push(arg);
+            if takes_value {
+                config_args.push(args.next().ok_or("missing config argument value")?);
+            }
+        }
+    }
+    Ok((
+        Options::load("config/eval-model.toml", config_args.into_iter())?,
+        matched_speed,
+    ))
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -95,5 +121,40 @@ fn main() -> ExitCode {
             eprintln!("{message}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matched_speed_flag_works_alongside_config_overrides() {
+        let config_args = [
+            "--config",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/eval-model.toml"),
+        ];
+        for args in [
+            vec!["--matched-speed", "--set", "baseline_visits_per_move=123"],
+            vec!["--set", "baseline_visits_per_move=123", "--matched-speed"],
+        ] {
+            let (_, matched_speed) =
+                eval_options(config_args.into_iter().chain(args).map(String::from)).unwrap();
+            assert!(matched_speed);
+        }
+        assert!(
+            !eval_options(config_args.into_iter().map(String::from))
+                .unwrap()
+                .1
+        );
+        assert!(
+            eval_options(
+                ["--matched-speed", "--matched-speed"]
+                    .into_iter()
+                    .map(String::from)
+            )
+            .is_err()
+        );
+        assert!(eval_options(["--set", "--matched-speed"].into_iter().map(String::from)).is_err());
     }
 }

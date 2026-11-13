@@ -98,6 +98,7 @@ fn time_matched_visits(
     players: [&ModelEvaluator; 2],
     batch_size: usize,
     baseline_visits: NonZeroU32,
+    matched_speed: bool,
 ) -> io::Result<[NonZeroU32; 2]> {
     const SAMPLES: usize = 31;
     let mut rng = ChaCha8Rng::seed_from_u64(0);
@@ -138,7 +139,12 @@ fn time_matched_visits(
         ));
     }
     let scaled = (f64::from(baseline_visits.get()) * baseline / candidate).round() as u32;
-    let candidate_visits = NonZeroU32::new(scaled).unwrap_or(NonZeroU32::MIN);
+    let candidate_visits = if matched_speed {
+        validate_matched_speed(timings.map(|pair| pair.map(|duration| duration.as_secs_f64())))?;
+        baseline_visits
+    } else {
+        NonZeroU32::new(scaled).unwrap_or(NonZeroU32::MIN)
+    };
     println!(
         "inference benchmark: batch={batch_size} median baseline={:.3} ms candidate={:.3} ms; visits baseline={baseline_visits} candidate={candidate_visits}",
         baseline * 1000.0,
@@ -147,9 +153,44 @@ fn time_matched_visits(
     Ok([baseline_visits, candidate_visits])
 }
 
+fn validate_matched_speed(timings: [[f64; 2]; 31]) -> io::Result<()> {
+    if timings
+        .iter()
+        .flatten()
+        .any(|t| !t.is_finite() || *t <= 0.0)
+    {
+        return Err(io::Error::other(
+            "inference benchmark needs finite positive timings",
+        ));
+    }
+    // Paired log ratios control for shared drift and treat speedups and slowdowns symmetrically.
+    let ratios = timings.map(|[baseline, candidate]| (candidate / baseline).ln());
+    let mean = ratios.iter().sum::<f64>() / ratios.len() as f64;
+    let variance = ratios
+        .iter()
+        .map(|ratio| (ratio - mean).powi(2))
+        .sum::<f64>()
+        / (ratios.len() - 1) as f64;
+    // Two-sided 95% Student-t interval, 30 degrees of freedom.
+    let margin = 2.042272456 * (variance / ratios.len() as f64).sqrt();
+    let [lower, upper] = [mean - margin, mean + margin].map(f64::exp);
+    let summary = format!(
+        "candidate/baseline inference time ratio={:.4}, 95% CI [{lower:.4}, {upper:.4}]",
+        mean.exp()
+    );
+    if lower > 1.0 || upper < 1.0 {
+        return Err(io::Error::other(format!(
+            "--matched-speed failed: {summary}; speed difference exceeds benchmark variability"
+        )));
+    }
+    println!("matched-speed check passed: {summary}");
+    Ok(())
+}
+
 pub fn run(
     options: Options,
     mode: Mode,
+    matched_speed: bool,
     players: [&ModelEvaluator; 2],
     settings: &Settings,
 ) -> io::Result<()> {
@@ -187,7 +228,12 @@ pub fn run(
         openings.len()
     );
     let benchmark_batch = usize::from(options.batch) * usize::from(options.leaves_per_game.get());
-    let visits = time_matched_visits(players, benchmark_batch, options.baseline_visits_per_move)?;
+    let visits = time_matched_visits(
+        players,
+        benchmark_batch,
+        options.baseline_visits_per_move,
+        matched_speed,
+    )?;
     let limit = 2 * options.max_pairs;
     let mut next_id = u64::from(options.batch).min(limit);
     let mut active: Vec<_> = (0..next_id)
@@ -325,6 +371,20 @@ pub fn run(
 mod tests {
     use super::*;
     use chess_config::TomlConfig;
+
+    #[test]
+    fn matched_speed_accepts_noise_and_rejects_both_directions() {
+        let timings = std::array::from_fn(|i| {
+            let baseline = 0.001 * (1.0 + i as f64 / 100.0);
+            [baseline, baseline * ((i as f64 - 15.0) * 0.001).exp()]
+        });
+        assert!(validate_matched_speed(timings).is_ok());
+        assert!(validate_matched_speed([[0.001, 0.001]; 31]).is_ok());
+        for factor in [0.9, 1.1] {
+            assert!(validate_matched_speed(timings.map(|[a, b]| [a, b * factor])).is_err());
+        }
+        assert!(validate_matched_speed([[0.0, 0.001]; 31]).is_err());
+    }
 
     #[test]
     fn paired_games_start_from_the_same_opening_with_colors_swapped() {
