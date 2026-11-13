@@ -1,5 +1,8 @@
 use std::{io, path::Path};
 
+#[cfg(feature = "cuda")]
+mod cuda;
+
 use candle_core::{DType, Device};
 use chess_config::DeviceConfig;
 use chess_data::Board;
@@ -20,6 +23,8 @@ pub struct Prediction {
 pub struct InferenceModel {
     net: Net,
     device: Device,
+    #[cfg(feature = "cuda")]
+    cuda: std::sync::Mutex<cuda::Inference>,
 }
 
 impl InferenceModel {
@@ -27,7 +32,12 @@ impl InferenceModel {
         let device = device.try_into().map_err(io::Error::other)?;
         let checkpoint = Checkpoint::load(model_dir, &device)?;
         let net = checkpoint.into_model(&device).map_err(io::Error::other)?;
-        Ok(Self { net, device })
+        Ok(Self {
+            net,
+            device,
+            #[cfg(feature = "cuda")]
+            cuda: std::sync::Mutex::new(cuda::Inference::default()),
+        })
     }
 
     pub fn value_config(&self) -> ValueConfig {
@@ -47,6 +57,16 @@ impl InferenceModel {
         }
         if size == 0 {
             return Ok(Vec::new());
+        }
+        #[cfg(feature = "cuda")]
+        if self.device.is_cuda() {
+            let (logits, values) = self
+                .cuda
+                .lock()
+                .map_err(|e| io::Error::other(e.to_string()))?
+                .evaluate(&self.net, positions, moves.clone(), &self.device)
+                .map_err(io::Error::other)?;
+            return predictions(moves, logits, values);
         }
         let mut features = Vec::with_capacity(size * SQUARES * INPUTS);
         for (snapshot, black) in positions {
@@ -72,28 +92,39 @@ impl InferenceModel {
             .to_dtype(DType::F32)
             .and_then(|x| x.to_vec2::<f32>())
             .map_err(io::Error::other)?;
-        moves
-            .zip(logits)
-            .zip(value_logits)
-            .map(|((moves, mut priors), wdl)| {
-                let value = expected_value(wdl.try_into().expect("three WDL logits"));
-                priors.truncate(moves.len());
-                if priors.is_empty()
-                    || !value.is_finite()
-                    || priors.iter().any(|logit| !logit.is_finite())
-                {
-                    return Err(io::Error::other("empty or non-finite model prediction"));
-                }
-                let max = priors.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                for logit in &mut priors {
-                    *logit = (*logit - max).exp();
-                }
-                let sum = priors.iter().sum::<f32>();
-                for prior in &mut priors {
-                    *prior /= sum;
-                }
-                Ok(Prediction { value, priors })
-            })
-            .collect()
+        predictions(moves, logits, value_logits)
     }
 }
+
+fn predictions(
+    moves: impl Iterator<Item = impl ExactSizeIterator<Item = u16>>,
+    logits: Vec<Vec<f32>>,
+    value_logits: Vec<Vec<f32>>,
+) -> io::Result<Vec<Prediction>> {
+    moves
+        .zip(logits)
+        .zip(value_logits)
+        .map(|((moves, mut priors), wdl)| {
+            let value = expected_value(wdl.try_into().expect("three WDL logits"));
+            priors.truncate(moves.len());
+            if priors.is_empty()
+                || !value.is_finite()
+                || priors.iter().any(|logit| !logit.is_finite())
+            {
+                return Err(io::Error::other("empty or non-finite model prediction"));
+            }
+            let max = priors.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            for logit in &mut priors {
+                *logit = (*logit - max).exp();
+            }
+            let sum = priors.iter().sum::<f32>();
+            for prior in &mut priors {
+                *prior /= sum;
+            }
+            Ok(Prediction { value, priors })
+        })
+        .collect()
+}
+
+#[cfg(all(test, feature = "cuda"))]
+mod tests;
