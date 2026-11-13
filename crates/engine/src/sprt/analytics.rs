@@ -4,11 +4,11 @@ use std::f64::consts::PI;
 use super::{
     Config, NORMALIZATION,
     likelihood::{Distribution, moments},
-    score_to_elo,
+    score_to_nelo,
 };
 
 pub(crate) struct Estimate {
-    pub elo: f64,
+    pub nelo: f64,
     pub interval: [f64; 2],
 }
 
@@ -20,9 +20,9 @@ pub(super) fn estimate(config: &Config, counts: [u64; 5]) -> Option<Estimate> {
     let distribution = Distribution::new(counts);
     let (mean, variance) = moments(distribution.probabilities);
     let sigma_pg = (2.0 * variance).sqrt();
-    let to_score = |elo| 0.5 + elo / NORMALIZATION * sigma_pg;
-    let low = to_score(config.lower_elo);
-    let high = to_score(config.upper_elo);
+    let to_score = |nelo| 0.5 + nelo / NORMALIZATION * sigma_pg;
+    let low = to_score(config.lower_nelo);
+    let high = to_score(config.upper_nelo);
     let midpoint = (low + high) / 2.0;
     let slope = (high - low) / variance;
     let drift = (mean - midpoint) * slope;
@@ -55,10 +55,10 @@ pub(super) fn estimate(config: &Config, counts: [u64; 5]) -> Option<Estimate> {
                 hi = mid;
             }
         }
-        Some(score_to_elo((lo + hi) / 2.0))
+        Some(score_to_nelo((lo + hi) / 2.0, variance))
     };
     Some(Estimate {
-        elo: quantile(0.5)?,
+        nelo: quantile(0.5)?,
         interval: [quantile(0.025)?, quantile(0.975)?],
     })
 }

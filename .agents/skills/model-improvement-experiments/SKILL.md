@@ -5,7 +5,7 @@ description: Plan, run, and interpret Chess Engine 5 experiments on training dat
 
 # Scope
 
-This skill covers data generation and labeling, data selection and sampling, model architecture, training recipes, and model inference. Engine and search changes are out of scope. All experiments should compare a candidate against the baseline with the goal of getting a measurable Elo gain.
+This skill covers data generation and labeling, data selection and sampling, model architecture, training recipes, and model inference. Engine and search changes are out of scope. All experiments should compare a candidate against the baseline with the goal of getting a measurable nElo gain.
 
 ## Multiple experiments
 
@@ -21,7 +21,7 @@ Treat a sweep as one experiment. Start all variants from the same baseline setti
 
 ## Experiment Types
 
-Assign each experiment exactly one category based on its deliberate intervention. Speed and Elo changes are outcomes and do not determine the category. Supporting implementation work and budget reallocation follow the primary intervention.
+Assign each experiment exactly one category based on its deliberate intervention. Speed and nElo changes are outcomes and do not determine the category. Supporting implementation work and budget reallocation follow the primary intervention.
 
 ### Data generation
 
@@ -51,7 +51,7 @@ Required evidence: `mise run eval-model -- gainer "$candidate_dir"`
 
 ### Model ablation
 
-Same as model architecture changes, but seeks to simplify the model architecture without losing Elo.
+Same as model architecture changes, but seeks to simplify the model architecture without losing nElo.
 
 Examples:
 * Disabling smolgen
@@ -90,7 +90,7 @@ Required evidence:
 
 ### Experimental measurement
 
-Changes how systems are measured or compared, including statistical tests, benchmarking, time matching, and budget definitions. These changes only require a theoretical justification as to why they're good for pursuing the goal of maximizing Elo gains per day. Add a new baseline if needed. Mention any relevant data that led to this decision.
+Changes how systems are measured or compared, including statistical tests, benchmarking, time matching, and budget definitions. These changes only require a theoretical justification as to why they're good for pursuing the goal of maximizing nElo gains per day. Add a new baseline if needed. Mention any relevant data that led to this decision.
 
 ### Combined intervention
 
@@ -111,5 +111,5 @@ An experiment report must include the following:
 
 If a baseline match was run, include:
 * The candidate's wins, draws, and losses (W/D/L)
-* Observed Elo with its 95% confidence interval
+* Observed nElo with its 95% confidence interval
 * The SPRT verdict (passed, failed, or inconclusive)

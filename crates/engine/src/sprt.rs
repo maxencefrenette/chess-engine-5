@@ -14,17 +14,17 @@ const NORMALIZATION: f64 = 800.0 / std::f64::consts::LN_10;
 
 #[chess_config::toml_config]
 pub(crate) struct Config {
-    pub lower_elo: f64,
-    pub upper_elo: f64,
+    pub lower_nelo: f64,
+    pub upper_nelo: f64,
     pub alpha: f64,
     pub beta: f64,
 }
 
 impl Config {
     pub fn validate(&self) -> bool {
-        self.lower_elo.is_finite()
-            && self.upper_elo.is_finite()
-            && self.lower_elo < self.upper_elo
+        self.lower_nelo.is_finite()
+            && self.upper_nelo.is_finite()
+            && self.lower_nelo < self.upper_nelo
             && self.alpha > 0.0
             && self.beta > 0.0
             && self.alpha + self.beta < 1.0
@@ -42,9 +42,9 @@ impl Config {
             return Ok(0.0);
         }
         let distribution = Distribution::new(counts);
-        let fit = |elo| distribution.fit_standardized(elo / NORMALIZATION * 2.0_f64.sqrt());
-        let lower = fit(self.lower_elo)?;
-        let upper = fit(self.upper_elo)?;
+        let fit = |nelo| distribution.fit_standardized(nelo / NORMALIZATION * 2.0_f64.sqrt());
+        let lower = fit(self.lower_nelo)?;
+        let upper = fit(self.upper_nelo)?;
         let llr = distribution.count
             * (0..5)
                 .map(|i| distribution.probabilities[i] * (upper[i].ln() - lower[i].ln()))
@@ -56,7 +56,7 @@ impl Config {
     }
 
     /// Fishtest's Brownian approximation, accounting for the SPRT boundaries.
-    /// Bounds use normalized Elo; estimates and intervals use ordinary Elo.
+    /// Bounds, estimates, and intervals use nElo.
     pub fn estimate(&self, counts: [u64; 5]) -> Option<Estimate> {
         analytics::estimate(self, counts)
     }
@@ -74,11 +74,12 @@ pub(crate) fn fixed_estimate(counts: [u64; 5]) -> Option<Estimate> {
     }
     let margin = 1.959963984540054 * (variance / (pairs - 1.0)).sqrt();
     Some(Estimate {
-        elo: score_to_elo(mean),
-        interval: [mean - margin, mean + margin].map(|score| score_to_elo(score.clamp(0.0, 1.0))),
+        nelo: score_to_nelo(mean, variance),
+        interval: [mean - margin, mean + margin]
+            .map(|score| score_to_nelo(score.clamp(0.0, 1.0), variance)),
     })
 }
 
-fn score_to_elo(score: f64) -> f64 {
-    400.0 * (score / (1.0 - score)).log10()
+fn score_to_nelo(score: f64, pair_variance: f64) -> f64 {
+    NORMALIZATION * (score - 0.5) / (2.0 * pair_variance).sqrt()
 }

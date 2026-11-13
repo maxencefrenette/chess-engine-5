@@ -11,13 +11,13 @@ seed = 42
 loss_stddev = 0.002496
 
 [sprt.gainer]
-lower_elo = 0.0
-upper_elo = 20.0
+lower_nelo = 0.0
+upper_nelo = 20.0
 alpha = 0.05
 beta = 0.05
 
 [sprt.non-regression]
-lower_elo = -20.0
-upper_elo = 0.0
+lower_nelo = -20.0
+upper_nelo = 0.0
 alpha = 0.05
 beta = 0.05
