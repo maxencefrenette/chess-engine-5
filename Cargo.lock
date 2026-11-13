@@ -333,6 +333,7 @@ dependencies = [
  "chess-config",
  "chess-data",
  "chess-network",
+ "chess-opening-book",
  "rand",
  "rand_chacha",
  "serde",
@@ -357,6 +358,15 @@ dependencies = [
  "chess-data",
  "serde",
  "toml",
+]
+
+[[package]]
+name = "chess-opening-book"
+version = "0.1.0"
+dependencies = [
+ "rand",
+ "rand_chacha",
+ "tempfile",
 ]
 
 [[package]]

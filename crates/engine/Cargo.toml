@@ -10,6 +10,7 @@ serde_json = "1"
 candle-core.workspace = true
 chess-network = { path = "../network" }
 chess-data = { path = "../data" }
+chess-opening-book = { path = "../opening-book" }
 
 serde.workspace = true
 chess-config = { path = "../config" }

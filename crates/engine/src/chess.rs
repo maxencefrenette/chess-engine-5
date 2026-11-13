@@ -1,5 +1,7 @@
 use std::fmt;
 
+mod fen;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Color {
     White,
@@ -492,33 +494,10 @@ mod tests {
     #[test]
     fn tactical_position_perft() {
         // Kiwipete includes castling, pins, and en passant in its first three plies.
-        let ranks = [
-            "r...k..r", "p.ppqpb.", "bn..pnp.", "...PN...", ".p..P...", "..N..Q.p", "PPPBBPPP",
-            "R...K..R",
-        ];
-        let mut position = Game::default().position;
-        for (rank, row) in ranks.into_iter().rev().enumerate() {
-            for (file, symbol) in row.chars().enumerate() {
-                let piece = match symbol.to_ascii_lowercase() {
-                    'p' => Pawn,
-                    'n' => Knight,
-                    'b' => Bishop,
-                    'r' => Rook,
-                    'q' => Queen,
-                    'k' => King,
-                    _ => {
-                        position.board[8 * rank + file] = None;
-                        continue;
-                    }
-                };
-                let color = if symbol.is_ascii_uppercase() {
-                    Color::White
-                } else {
-                    Color::Black
-                };
-                position.board[8 * rank + file] = Some((color, piece));
-            }
-        }
+        let position =
+            Game::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1")
+                .unwrap()
+                .position;
         assert_eq!(perft(&position, 3), 97_862);
     }
 

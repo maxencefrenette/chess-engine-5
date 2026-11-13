@@ -1,4 +1,5 @@
 baseline_dir = "/data/chess/chess-engine-5/models/bf16-data-2026.11.11/candidate"
+opening_book = "UHO_Lichess_4560_v1.epd"
 device = "cuda"
 batch = 128
 leaves_per_game = 4

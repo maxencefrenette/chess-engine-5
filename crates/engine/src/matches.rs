@@ -26,12 +26,12 @@ struct ActiveGame {
 }
 
 impl ActiveGame {
-    fn new(id: u64, seed: u64) -> Self {
+    fn new(id: u64, seed: u64, openings: &[Game]) -> Self {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         rng.set_stream(id / 2);
         Self {
             id,
-            game: Game::default(),
+            game: openings[(id / 2) as usize].clone(),
             search: Search::new(),
             rng,
             ply: 0,
@@ -80,6 +80,7 @@ struct SprtPresets {
 #[chess_config::toml_config]
 pub struct Options {
     pub baseline_dir: PathBuf,
+    opening_book: String,
     pub device: chess_config::DeviceConfig,
     pub loss_stddev: f64,
     batch: u16,
@@ -205,12 +206,32 @@ pub fn run(
     if sprt.as_ref().is_some_and(|sprt| !sprt.validate()) {
         return Err(io::Error::other("invalid SPRT Elo bounds or error rates"));
     }
+    let openings = chess_opening_book::load(
+        &options.opening_book,
+        options.max_pairs as usize,
+        options.seed,
+    )?
+    .into_iter()
+    .map(|fen| {
+        let game = Game::from_fen(&fen)
+            .map_err(|error| io::Error::other(format!("opening {fen}: {error}")))?;
+        if game.outcome().is_some() {
+            return Err(io::Error::other(format!("terminal opening: {fen}")));
+        }
+        Ok(game)
+    })
+    .collect::<io::Result<Vec<_>>>()?;
+    println!(
+        "opening_book={} pairs={}",
+        options.opening_book,
+        openings.len()
+    );
     let benchmark_batch = usize::from(options.batch) * usize::from(options.leaves_per_game.get());
     let visits = time_matched_visits(players, benchmark_batch, options.baseline_visits_per_move)?;
     let limit = 2 * options.max_pairs;
     let mut next_id = u64::from(options.batch).min(limit);
     let mut active: Vec<_> = (0..next_id)
-        .map(|id| ActiveGame::new(id, options.seed))
+        .map(|id| ActiveGame::new(id, options.seed, &openings))
         .collect();
     let mut results = BTreeMap::new();
     let mut next_pair = 0;
@@ -314,7 +335,7 @@ pub fn run(
         }
         for i in finished.into_iter().rev() {
             if next_id < limit {
-                active[i] = ActiveGame::new(next_id, options.seed);
+                active[i] = ActiveGame::new(next_id, options.seed, &openings);
                 next_id += 1;
             } else {
                 active.swap_remove(i);
@@ -342,6 +363,28 @@ pub fn run(
 mod tests {
     use super::*;
     use chess_config::TomlConfig;
+
+    #[test]
+    fn paired_games_start_from_the_same_opening_with_colors_swapped() {
+        let opening = Game::from_fen("r3k2r/8/8/8/3pP3/8/8/R3K2R b KQkq e3 0 15").unwrap();
+        let openings = [opening];
+        let mut first = ActiveGame::new(0, 42, &openings);
+        let mut second = ActiveGame::new(1, 42, &openings);
+        assert_eq!(first.game.turn(), Color::Black);
+        assert_eq!(second.game.turn(), Color::Black);
+        assert_eq!(first.player(), 0);
+        assert_eq!(second.player(), 1);
+        assert_eq!(
+            first.game.snapshot(&first.game.legal_moves()),
+            second.game.snapshot(&second.game.legal_moves())
+        );
+        assert_eq!(first.rng.random::<u64>(), second.rng.random::<u64>());
+        assert_eq!(first.ply, 0);
+        let mv = first.game.legal_moves()[0];
+        first.game.play_legal(mv);
+        assert_eq!(second.game.turn(), Color::Black);
+        assert_eq!(openings[0].turn(), Color::Black);
+    }
 
     #[test]
     fn elo_interval_matches_fixed_match_analysis() {
