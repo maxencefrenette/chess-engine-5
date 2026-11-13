@@ -13,7 +13,7 @@ Run experiments sequentially. Finish each experiment’s evaluation and promotio
 
 ## Training budget
 
-Every training run is subject to a budget of 30min. It is defined as the time to train the model + 0.3 times the time required to generate the data that went into training the model. The budget used is reported by `mise run train`. Held-out data is excluded from the calculation. The timed runtime excludes data loading and setup and includes held-out evaluation and checkpoint saving. All arms of an experiment must be roughly budget-matched by being within 5% of the 30min budget.
+Every training run is subject to a budget of 90min. It is defined as the time to train the model + the time required to generate the data that went into training the model. The budget used is reported by `mise run train`. Held-out data is excluded from the calculation. The timed runtime excludes data loading and setup and includes held-out evaluation and checkpoint saving. All arms of an experiment must be roughly budget-matched by being within 5% of the 90min budget.
 
 ## Sweeps
 

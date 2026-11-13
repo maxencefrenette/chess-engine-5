@@ -9,7 +9,7 @@ use serde_json::json;
 
 use crate::data::{self, Batch, Result};
 
-const GENERATION_BUDGET_WEIGHT: f64 = 0.3;
+const GENERATION_BUDGET_WEIGHT: f64 = 1.0;
 const METRICS_INTERVAL: usize = 10;
 
 struct TrainingSample {
