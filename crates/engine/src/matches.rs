@@ -21,20 +21,14 @@ struct ActiveGame {
     id: u64,
     game: Game,
     search: Search,
-    rng: ChaCha8Rng,
-    ply: u32,
 }
 
 impl ActiveGame {
-    fn new(id: u64, seed: u64, openings: &[Game]) -> Self {
-        let mut rng = ChaCha8Rng::seed_from_u64(seed);
-        rng.set_stream(id / 2);
+    fn new(id: u64, openings: &[Game]) -> Self {
         Self {
             id,
             game: openings[(id / 2) as usize].clone(),
             search: Search::new(),
-            rng,
-            ply: 0,
         }
     }
 
@@ -50,15 +44,8 @@ impl ActiveGame {
         usize::from(self.game.turn() == self.candidate_color())
     }
 
-    fn play(&mut self, settings: &Settings) -> Option<Outcome> {
-        let temperature = if self.ply < settings.eval_sampling_plies {
-            settings.eval_temperature
-        } else {
-            0.0
-        };
-        self.game
-            .play_legal(self.search.choose_move(temperature, &mut self.rng));
-        self.ply += 1;
+    fn play(&mut self) -> Option<Outcome> {
+        self.game.play_legal(self.search.best_move());
         self.search = Search::new();
         self.game.outcome()
     }
@@ -231,7 +218,7 @@ pub fn run(
     let limit = 2 * options.max_pairs;
     let mut next_id = u64::from(options.batch).min(limit);
     let mut active: Vec<_> = (0..next_id)
-        .map(|id| ActiveGame::new(id, options.seed, &openings))
+        .map(|id| ActiveGame::new(id, &openings))
         .collect();
     let mut results = BTreeMap::new();
     let mut next_pair = 0;
@@ -272,7 +259,7 @@ pub fn run(
                 batch.push((i, leaf));
             }
             if batch.len() == before
-                && let Some(outcome) = slot.play(settings)
+                && let Some(outcome) = slot.play()
             {
                 let points = match outcome {
                     Outcome::Win(color) if color == slot.candidate_color() => 2,
@@ -335,7 +322,7 @@ pub fn run(
         }
         for i in finished.into_iter().rev() {
             if next_id < limit {
-                active[i] = ActiveGame::new(next_id, options.seed, &openings);
+                active[i] = ActiveGame::new(next_id, &openings);
                 next_id += 1;
             } else {
                 active.swap_remove(i);
@@ -368,8 +355,8 @@ mod tests {
     fn paired_games_start_from_the_same_opening_with_colors_swapped() {
         let opening = Game::from_fen("r3k2r/8/8/8/3pP3/8/8/R3K2R b KQkq e3 0 15").unwrap();
         let openings = [opening];
-        let mut first = ActiveGame::new(0, 42, &openings);
-        let mut second = ActiveGame::new(1, 42, &openings);
+        let mut first = ActiveGame::new(0, &openings);
+        let second = ActiveGame::new(1, &openings);
         assert_eq!(first.game.turn(), Color::Black);
         assert_eq!(second.game.turn(), Color::Black);
         assert_eq!(first.player(), 0);
@@ -378,8 +365,6 @@ mod tests {
             first.game.snapshot(&first.game.legal_moves()),
             second.game.snapshot(&second.game.legal_moves())
         );
-        assert_eq!(first.rng.random::<u64>(), second.rng.random::<u64>());
-        assert_eq!(first.ply, 0);
         let mv = first.game.legal_moves()[0];
         first.game.play_legal(mv);
         assert_eq!(second.game.turn(), Color::Black);

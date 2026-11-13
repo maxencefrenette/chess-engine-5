@@ -153,6 +153,15 @@ impl Search {
         self.path = leaf.path;
     }
 
+    /// Temperature-zero selection, with ties resolved by legal move order.
+    pub fn best_move(&self) -> Move {
+        self.visits()
+            .rev()
+            .max_by_key(|entry| entry.visits)
+            .unwrap()
+            .mv
+    }
+
     pub fn choose_move(&self, temperature: f64, rng: &mut impl Rng) -> Move {
         if temperature == 1.0 {
             let mut ticket = rng.random_range(0..self.tree.nodes[0].visits);
