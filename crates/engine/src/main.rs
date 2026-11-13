@@ -12,7 +12,7 @@ use chess_engine::{
 const USAGE: &str = "usage: chess-engine [--cuda] <command>
   search MODEL_DIR VISITS [MOVE ...]
   self-play [--config PATH] [--set KEY=VALUE]...
-  eval-model <gainer|non-regression> CANDIDATE_DIR [--config PATH] [--set KEY=VALUE]...";
+  eval-model <gainer|non-regression|fixed> CANDIDATE_DIR [--config PATH] [--set KEY=VALUE]...";
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
@@ -26,6 +26,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let mode = match args.next().as_deref() {
             Some("gainer") => Mode::Gainer,
             Some("non-regression") => Mode::NonRegression,
+            Some("fixed") => Mode::Fixed,
             _ => return Err(USAGE.into()),
         };
         let candidate_dir = args

@@ -113,5 +113,5 @@ An experiment report must include the following:
 
 If a baseline match was run, include:
 * The candidate's wins, draws, and losses (W/D/L)
-* Observed Elo as reported by `eval-model`
+* Observed Elo with its 95% confidence interval
 * The SPRT verdict (passed, failed, or inconclusive)

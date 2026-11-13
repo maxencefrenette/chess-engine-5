@@ -67,6 +67,7 @@ impl ActiveGame {
 pub enum Mode {
     Gainer,
     NonRegression,
+    Fixed,
 }
 
 #[chess_config::toml_config]
@@ -91,6 +92,44 @@ pub struct Options {
 fn observed_elo([wins, draws, losses]: [u64; 3]) -> f64 {
     let half_draws = draws as f64 / 2.0;
     400.0 * ((wins as f64 + half_draws) / (losses as f64 + half_draws)).log10()
+}
+
+fn elo_interval(counts: [u64; 5]) -> Option<[f64; 2]> {
+    let pairs = counts.iter().sum::<u64>() as f64;
+    if pairs < 2.0 {
+        return None;
+    }
+    let mean = counts
+        .iter()
+        .enumerate()
+        .map(|(i, &n)| n as f64 * i as f64 / 4.0)
+        .sum::<f64>()
+        / pairs;
+    // Each color-swapped pair is one observation; use unbiased sample variance.
+    let variance = counts
+        .iter()
+        .enumerate()
+        .map(|(i, &n)| n as f64 * (i as f64 / 4.0 - mean).powi(2))
+        .sum::<f64>()
+        / (pairs - 1.0);
+    if variance == 0.0 {
+        return None; // A normal approximation cannot estimate uncertainty here.
+    }
+    let margin = 1.959963984540054 * (variance / pairs).sqrt();
+    Some([mean - margin, mean + margin].map(|score| {
+        let score = score.clamp(0.0, 1.0);
+        400.0 * (score / (1.0 - score)).log10()
+    }))
+}
+
+fn elo_summary(wdl: [u64; 3], counts: [u64; 5]) -> String {
+    let estimate = observed_elo(wdl);
+    match elo_interval(counts) {
+        Some([lower, upper]) => {
+            format!("{estimate:+.1} ({lower:+.1}, {upper:+.1}) [approximate 95% CI]")
+        }
+        None => format!("{estimate:+.1} (95% CI unavailable: insufficient pair-score variation)"),
+    }
 }
 
 fn time_matched_visits(
@@ -158,15 +197,15 @@ pub fn run(
         ));
     }
     let sprt = match mode {
-        Mode::Gainer => options.sprt.gainer,
-        Mode::NonRegression => options.sprt.non_regression,
+        Mode::Gainer => Some(options.sprt.gainer),
+        Mode::NonRegression => Some(options.sprt.non_regression),
+        Mode::Fixed => None,
     };
-    if !sprt.validate() {
+    if sprt.as_ref().is_some_and(|sprt| !sprt.validate()) {
         return Err(io::Error::other("invalid SPRT Elo bounds or error rates"));
     }
     let benchmark_batch = usize::from(options.batch) * usize::from(options.leaves_per_game.get());
     let visits = time_matched_visits(players, benchmark_batch, options.baseline_visits_per_move)?;
-    let (lower, upper) = sprt.boundaries();
     let limit = 2 * options.max_pairs;
     let mut next_id = u64::from(options.batch).min(limit);
     let mut active: Vec<_> = (0..next_id)
@@ -178,12 +217,14 @@ pub fn run(
     let mut wdl = [0; 3];
     let mut llr = 0.0;
     let mut max_batches = [0; 2];
+    if let Some(sprt) = &sprt {
+        println!(
+            "SPRT [{}, {}] logistic Elo, alpha={} beta={}",
+            sprt.lower_elo, sprt.upper_elo, sprt.alpha, sprt.beta
+        );
+    }
     println!(
-        "checkpoint match; SPRT [{}, {}] logistic Elo, alpha={} beta={}; batch={} leaves_per_game={} visits baseline={} candidate={} max_pairs={} seed={}",
-        sprt.lower_elo,
-        sprt.upper_elo,
-        sprt.alpha,
-        sprt.beta,
+        "checkpoint match; batch={} leaves_per_game={} visits baseline={} candidate={} max_pairs={} seed={}",
         options.batch,
         options.leaves_per_game,
         visits[0],
@@ -231,20 +272,29 @@ pub fn run(
             wdl[2 - first] += 1;
             wdl[2 - second] += 1;
             next_pair += 1;
-            llr = sprt.llr(counts);
-            let decided = llr <= lower || llr >= upper;
-            if next_pair.is_multiple_of(10) || decided {
+            let decision = sprt.as_ref().and_then(|sprt| {
+                llr = sprt.llr(counts);
+                let (lower, upper) = sprt.boundaries();
+                if llr >= upper {
+                    Some(("H1", sprt.upper_elo))
+                } else if llr <= lower {
+                    Some(("H0", sprt.lower_elo))
+                } else {
+                    None
+                }
+            });
+            if next_pair.is_multiple_of(10) || decision.is_some() {
+                let evidence = if sprt.is_some() {
+                    format!(" LLR={llr:.4}")
+                } else {
+                    String::new()
+                };
                 println!(
-                    "pairs={next_pair} candidate W/D/L={wdl:?} observed Elo={:+.1} pentanomial={counts:?} LLR={llr:.4}",
-                    observed_elo(wdl)
+                    "pairs={next_pair} candidate W/D/L={wdl:?} observed Elo={} pentanomial={counts:?}{evidence}",
+                    elo_summary(wdl, counts)
                 );
             }
-            if decided {
-                let (hypothesis, elo) = if llr >= upper {
-                    ("H1", sprt.upper_elo)
-                } else {
-                    ("H0", sprt.lower_elo)
-                };
+            if let Some((hypothesis, elo)) = decision {
                 println!(
                     "accepted {hypothesis} ({elo:+} Elo); largest inference batches (baseline/candidate)={max_batches:?}"
                 );
@@ -270,9 +320,19 @@ pub fn run(
             }
         }
     }
+    let status = if sprt.is_some() {
+        "inconclusive at cap"
+    } else {
+        "fixed match complete"
+    };
+    let evidence = if sprt.is_some() {
+        format!(" LLR={llr:.4}")
+    } else {
+        String::new()
+    };
     println!(
-        "inconclusive at cap: pairs={next_pair} candidate W/D/L={wdl:?} observed Elo={:+.1} pentanomial={counts:?} LLR={llr:.4}; largest inference batches (baseline/candidate)={max_batches:?}",
-        observed_elo(wdl)
+        "{status}: pairs={next_pair} candidate W/D/L={wdl:?} observed Elo={} pentanomial={counts:?}{evidence}; largest inference batches (baseline/candidate)={max_batches:?}",
+        elo_summary(wdl, counts)
     );
     Ok(())
 }
@@ -281,6 +341,39 @@ pub fn run(
 mod tests {
     use super::*;
     use chess_config::TomlConfig;
+
+    #[test]
+    fn elo_interval_matches_fixed_match_analysis() {
+        let counts = [135, 440, 682, 529, 214];
+        let [lower, upper] = elo_interval(counts).unwrap();
+        assert!((lower - 13.2330497044).abs() < 1e-8);
+        assert!((upper - 29.7541676487).abs() < 1e-8);
+        assert_eq!(
+            elo_summary([1295, 1657, 1048], counts),
+            "+21.5 (+13.2, +29.8) [approximate 95% CI]"
+        );
+    }
+
+    #[test]
+    fn elo_interval_uses_pair_variance_and_handles_degenerate_samples() {
+        // Both samples have the same W/D/L, but differently correlated pairs.
+        let correlated = elo_interval([50, 0, 0, 0, 50]).unwrap();
+        let mixed = elo_interval([25, 0, 50, 0, 25]).unwrap();
+        assert!(correlated[0] < mixed[0]);
+        assert!(correlated[1] > mixed[1]);
+        for counts in [
+            [0; 5],
+            [0, 0, 1, 0, 0],
+            [0, 0, 100, 0, 0],
+            [100, 0, 0, 0, 0],
+            [0, 0, 0, 0, 100],
+        ] {
+            assert!(elo_interval(counts).is_none());
+        }
+        let [lower, upper] = elo_interval([1, 0, 0, 0, 1]).unwrap();
+        assert_eq!(lower, f64::NEG_INFINITY);
+        assert_eq!(upper, f64::INFINITY);
+    }
 
     #[test]
     fn configured_baseline_checkpoint_loads_on_cpu() -> Result<(), Box<dyn std::error::Error>> {
