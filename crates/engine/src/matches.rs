@@ -107,7 +107,7 @@ fn elo_interval(counts: [u64; 5]) -> Option<[f64; 2]> {
         .map(|(i, &n)| n as f64 * i as f64 / 4.0)
         .sum::<f64>()
         / pairs;
-    // Each color-swapped pair is one observation; use unbiased sample variance.
+    // Each game pair is one observation; use unbiased sample variance.
     let variance = counts
         .iter()
         .enumerate()

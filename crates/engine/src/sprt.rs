@@ -1,4 +1,4 @@
-// Scores are the candidate's total points per color-swapped pair, in half-points.
+// Scores are the candidate's total points per game pair, in half-points.
 #[chess_config::toml_config]
 pub(crate) struct Config {
     pub lower_elo: f64,

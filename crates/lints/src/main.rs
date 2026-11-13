@@ -2,6 +2,8 @@ use std::{error::Error, fs, path::Path, process::ExitCode};
 
 use syn::{Item, ItemStruct, Meta, Token, Type, punctuated::Punctuated, spanned::Spanned};
 
+mod text;
+
 #[derive(Default)]
 struct ConfigLints {
     violations: Vec<(usize, usize, String)>,
@@ -157,7 +159,12 @@ fn check_tree(directory: &Path) -> Result<bool, Box<dyn Error>> {
 }
 
 fn main() -> ExitCode {
-    match check_tree(Path::new("crates")) {
+    let result = (|| {
+        let rust_clean = check_tree(Path::new("crates"))?;
+        let text_clean = text::check_repository()?;
+        Ok::<_, Box<dyn Error>>(rust_clean && text_clean)
+    })();
+    match result {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
         Err(error) => {
