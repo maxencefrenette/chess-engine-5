@@ -334,6 +334,7 @@ dependencies = [
  "chess-data",
  "chess-network",
  "chess-opening-book",
+ "libm",
  "rand",
  "rand_chacha",
  "serde",

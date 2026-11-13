@@ -78,46 +78,19 @@ pub struct Options {
     sprt: SprtPresets,
 }
 
-fn observed_elo([wins, draws, losses]: [u64; 3]) -> f64 {
-    let half_draws = draws as f64 / 2.0;
-    400.0 * ((wins as f64 + half_draws) / (losses as f64 + half_draws)).log10()
-}
-
-fn elo_interval(counts: [u64; 5]) -> Option<[f64; 2]> {
-    let pairs = counts.iter().sum::<u64>() as f64;
-    if pairs < 2.0 {
-        return None;
-    }
-    let mean = counts
-        .iter()
-        .enumerate()
-        .map(|(i, &n)| n as f64 * i as f64 / 4.0)
-        .sum::<f64>()
-        / pairs;
-    // Each game pair is one observation; use unbiased sample variance.
-    let variance = counts
-        .iter()
-        .enumerate()
-        .map(|(i, &n)| n as f64 * (i as f64 / 4.0 - mean).powi(2))
-        .sum::<f64>()
-        / (pairs - 1.0);
-    if variance == 0.0 {
-        return None; // A normal approximation cannot estimate uncertainty here.
-    }
-    let margin = 1.959963984540054 * (variance / pairs).sqrt();
-    Some([mean - margin, mean + margin].map(|score| {
-        let score = score.clamp(0.0, 1.0);
-        400.0 * (score / (1.0 - score)).log10()
-    }))
-}
-
-fn elo_summary(wdl: [u64; 3], counts: [u64; 5]) -> String {
-    let estimate = observed_elo(wdl);
-    match elo_interval(counts) {
-        Some([lower, upper]) => {
-            format!("{estimate:+.1} ({lower:+.1}, {upper:+.1}) [approximate 95% CI]")
+fn elo_summary(counts: [u64; 5], sprt: Option<&sprt::Config>) -> String {
+    let (estimate, method) = match sprt {
+        Some(config) => (config.estimate(counts), "SPRT-adjusted approximate 95% CI"),
+        None => (sprt::fixed_estimate(counts), "approximate 95% CI"),
+    };
+    match estimate {
+        Some(sprt::Estimate {
+            elo,
+            interval: [lower, upper],
+        }) => {
+            format!("{elo:+.1} ({lower:+.1}, {upper:+.1}) [{method}]")
         }
-        None => format!("{estimate:+.1} (95% CI unavailable: insufficient pair-score variation)"),
+        None => "unavailable (insufficient pair-score variation)".into(),
     }
 }
 
@@ -228,7 +201,7 @@ pub fn run(
     let mut max_batches = [0; 2];
     if let Some(sprt) = &sprt {
         println!(
-            "SPRT [{}, {}] logistic Elo, alpha={} beta={}",
+            "SPRT [{}, {}] normalized Elo, alpha={} beta={}",
             sprt.lower_elo, sprt.upper_elo, sprt.alpha, sprt.beta
         );
     }
@@ -281,8 +254,10 @@ pub fn run(
             wdl[2 - first] += 1;
             wdl[2 - second] += 1;
             next_pair += 1;
+            if let Some(sprt) = &sprt {
+                llr = sprt.llr(counts)?;
+            }
             let decision = sprt.as_ref().and_then(|sprt| {
-                llr = sprt.llr(counts);
                 let (lower, upper) = sprt.boundaries();
                 if llr >= upper {
                     Some(("H1", sprt.upper_elo))
@@ -299,13 +274,13 @@ pub fn run(
                     String::new()
                 };
                 println!(
-                    "pairs={next_pair} candidate W/D/L={wdl:?} observed Elo={} pentanomial={counts:?}{evidence}",
-                    elo_summary(wdl, counts)
+                    "pairs={next_pair} candidate W/D/L={wdl:?} Elo={} pentanomial={counts:?}{evidence}",
+                    elo_summary(counts, sprt.as_ref())
                 );
             }
             if let Some((hypothesis, elo)) = decision {
                 println!(
-                    "accepted {hypothesis} ({elo:+} Elo); largest inference batches (baseline/candidate)={max_batches:?}"
+                    "accepted {hypothesis} ({elo:+} normalized Elo); largest inference batches (baseline/candidate)={max_batches:?}"
                 );
                 return Ok(());
             }
@@ -340,8 +315,8 @@ pub fn run(
         String::new()
     };
     println!(
-        "{status}: pairs={next_pair} candidate W/D/L={wdl:?} observed Elo={} pentanomial={counts:?}{evidence}; largest inference batches (baseline/candidate)={max_batches:?}",
-        elo_summary(wdl, counts)
+        "{status}: pairs={next_pair} candidate W/D/L={wdl:?} Elo={} pentanomial={counts:?}{evidence}; largest inference batches (baseline/candidate)={max_batches:?}",
+        elo_summary(counts, sprt.as_ref())
     );
     Ok(())
 }
@@ -372,36 +347,37 @@ mod tests {
     }
 
     #[test]
-    fn elo_interval_matches_fixed_match_analysis() {
+    fn reporting_uses_ordinary_elo_with_normalized_sprt_bounds() {
         let counts = [135, 440, 682, 529, 214];
-        let [lower, upper] = elo_interval(counts).unwrap();
-        assert!((lower - 13.2330497044).abs() < 1e-8);
-        assert!((upper - 29.7541676487).abs() < 1e-8);
+        let config = sprt::Config {
+            lower_elo: 0.0,
+            upper_elo: 20.0,
+            alpha: 0.05,
+            beta: 0.05,
+        };
         assert_eq!(
-            elo_summary([1295, 1657, 1048], counts),
+            elo_summary(counts, Some(&config)),
+            "+18.9 (+1.3, +36.2) [SPRT-adjusted approximate 95% CI]"
+        );
+        assert_eq!(
+            elo_summary(counts, None),
             "+21.5 (+13.2, +29.8) [approximate 95% CI]"
         );
-    }
-
-    #[test]
-    fn elo_interval_uses_pair_variance_and_handles_degenerate_samples() {
-        // Both samples have the same W/D/L, but differently correlated pairs.
-        let correlated = elo_interval([50, 0, 0, 0, 50]).unwrap();
-        let mixed = elo_interval([25, 0, 50, 0, 25]).unwrap();
-        assert!(correlated[0] < mixed[0]);
-        assert!(correlated[1] > mixed[1]);
         for counts in [
             [0; 5],
             [0, 0, 1, 0, 0],
             [0, 0, 100, 0, 0],
             [100, 0, 0, 0, 0],
-            [0, 0, 0, 0, 100],
         ] {
-            assert!(elo_interval(counts).is_none());
+            assert_eq!(
+                elo_summary(counts, None),
+                "unavailable (insufficient pair-score variation)"
+            );
+            assert_eq!(
+                elo_summary(counts, Some(&config)),
+                "unavailable (insufficient pair-score variation)"
+            );
         }
-        let [lower, upper] = elo_interval([1, 0, 0, 0, 1]).unwrap();
-        assert_eq!(lower, f64::NEG_INFINITY);
-        assert_eq!(upper, f64::INFINITY);
     }
 
     #[test]

@@ -1,4 +1,17 @@
 // Scores are the candidate's total points per game pair, in half-points.
+mod analytics;
+mod likelihood;
+
+#[cfg(test)]
+mod tests;
+
+use std::io;
+
+pub(crate) use analytics::Estimate;
+use likelihood::Distribution;
+
+const NORMALIZATION: f64 = 800.0 / std::f64::consts::LN_10;
+
 #[chess_config::toml_config]
 pub(crate) struct Config {
     pub lower_elo: f64,
@@ -12,8 +25,6 @@ impl Config {
         self.lower_elo.is_finite()
             && self.upper_elo.is_finite()
             && self.lower_elo < self.upper_elo
-            && score(self.lower_elo) > 0.0
-            && score(self.upper_elo) < 1.0
             && self.alpha > 0.0
             && self.beta > 0.0
             && self.alpha + self.beta < 1.0
@@ -26,65 +37,48 @@ impl Config {
         )
     }
 
-    pub fn llr(&self, counts: [u64; 5]) -> f64 {
-        log_likelihood(counts, self.upper_elo) - log_likelihood(counts, self.lower_elo)
-    }
-}
-
-fn score(elo: f64) -> f64 {
-    1.0 / (1.0 + 10_f64.powf(-elo / 400.0))
-}
-
-fn log_likelihood(counts: [u64; 5], elo: f64) -> f64 {
-    let score = score(elo);
-    let distances = std::array::from_fn::<_, 5, _>(|i| i as f64 / 4.0 - score);
-    // Regularize unobserved bins so the constrained solution has full support.
-    let weights = counts.map(|n| if n == 0 { 0.001 } else { n as f64 });
-    let mut low = -1.0 / distances[4];
-    let mut high = -1.0 / distances[0];
-    // Profile the unknown pair distribution subject to the hypothesized mean.
-    // Its fitted probabilities are proportional to n_i / (1 + lambda * d_i).
-    for _ in 0..64 {
-        let mid = (low + high) / 2.0;
-        let residual: f64 = weights
-            .iter()
-            .zip(distances)
-            .map(|(weight, d)| weight * d / (1.0 + mid * d))
-            .sum();
-        if residual > 0.0 {
-            low = mid;
-        } else {
-            high = mid;
+    pub fn llr(&self, counts: [u64; 5]) -> io::Result<f64> {
+        if counts == [0; 5] {
+            return Ok(0.0);
         }
+        let distribution = Distribution::new(counts);
+        let fit = |elo| distribution.fit_standardized(elo / NORMALIZATION * 2.0_f64.sqrt());
+        let lower = fit(self.lower_elo)?;
+        let upper = fit(self.upper_elo)?;
+        let llr = distribution.count
+            * (0..5)
+                .map(|i| distribution.probabilities[i] * (upper[i].ln() - lower[i].ln()))
+                .sum::<f64>();
+        if !llr.is_finite() {
+            return Err(io::Error::other("non-finite SPRT likelihood"));
+        }
+        Ok(llr)
     }
-    let lambda = (low + high) / 2.0;
-    // The empirical-frequency terms cancel when subtracting the two fits.
-    -weights
-        .iter()
-        .zip(distances)
-        .map(|(weight, d)| weight * (lambda * d).ln_1p())
-        .sum::<f64>()
+
+    /// Fishtest's Brownian approximation, accounting for the SPRT boundaries.
+    /// Bounds use normalized Elo; estimates and intervals use ordinary Elo.
+    pub fn estimate(&self, counts: [u64; 5]) -> Option<Estimate> {
+        analytics::estimate(self, counts)
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn logistic_pair_likelihood_matches_closed_form_for_balanced_decisive_pairs() {
-        // With only the two extreme bins occupied, the fitted probabilities
-        // approach those of a Bernoulli trial. Regularization is negligible here.
-        let config = Config {
-            lower_elo: 0.,
-            upper_elo: 20.,
-            alpha: 0.05,
-            beta: 0.05,
-        };
-        let score = score(config.upper_elo);
-        let (lower, upper) = config.boundaries();
-        let expected = 1000.0 * (4.0 * score * (1.0 - score)).ln();
-        assert!((config.llr([1000, 0, 0, 0, 1000]) - expected).abs() < 0.001);
-        assert!(config.llr([0, 0, 0, 0, 200]) > upper);
-        assert!(config.llr([200, 0, 0, 0, 0]) < lower);
+/// Fixed-sample normal approximation over game-pair scores.
+pub(crate) fn fixed_estimate(counts: [u64; 5]) -> Option<Estimate> {
+    let pairs = counts.iter().sum::<u64>() as f64;
+    if pairs < 2.0 {
+        return None;
     }
+    let (mean, variance) = likelihood::moments(counts.map(|n| n as f64 / pairs));
+    if variance == 0.0 {
+        return None;
+    }
+    let margin = 1.959963984540054 * (variance / (pairs - 1.0)).sqrt();
+    Some(Estimate {
+        elo: score_to_elo(mean),
+        interval: [mean - margin, mean + margin].map(|score| score_to_elo(score.clamp(0.0, 1.0))),
+    })
+}
+
+fn score_to_elo(score: f64) -> f64 {
+    400.0 * (score / (1.0 - score)).log10()
 }
