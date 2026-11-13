@@ -81,6 +81,7 @@ struct SprtPresets {
 pub struct Options {
     pub baseline_dir: PathBuf,
     pub device: chess_config::DeviceConfig,
+    pub loss_stddev: f64,
     batch: u16,
     leaves_per_game: NonZeroU16,
     baseline_visits_per_move: NonZeroU32,

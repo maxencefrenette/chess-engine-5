@@ -3,9 +3,11 @@ device = "cuda"
 batch = 128
 leaves_per_game = 4
 baseline_visits_per_move = 800
-# Each pair plays two games with colors swapped.
 max_pairs = 10000
 seed = 42
+
+# Run-to-run variation in loss
+loss_stddev = 0.002496
 
 [sprt.gainer]
 lower_elo = 0.0
