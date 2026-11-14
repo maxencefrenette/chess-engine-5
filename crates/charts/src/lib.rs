@@ -1,21 +1,15 @@
 //! Shared SVG charts for experiment reports.
+mod panels;
+mod style;
+pub use panels::{LinePanel, line_panels};
+
 use std::{error::Error, ops::Range, path::Path};
 
 use plotters::{coord::Shift, prelude::*};
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-const FONT: &str = "sans-serif";
-const INK: RGBColor = RGBColor(42, 48, 58);
-const GRID: RGBColor = RGBColor(230, 233, 238);
-const COLORS: [RGBColor; 6] = [
-    RGBColor(0, 114, 178),
-    RGBColor(213, 94, 0),
-    RGBColor(0, 158, 115),
-    RGBColor(204, 121, 167),
-    RGBColor(86, 180, 233),
-    RGBColor(145, 105, 20),
-];
+use style::{FONT, INK, LEGEND_BORDER, LINE_WIDTH, MARKER_RADIUS, color, frame};
 
 pub struct Series {
     pub label: String,
@@ -41,7 +35,7 @@ fn valid_estimate(nelo: f64, lower: f64, upper: f64) -> bool {
 }
 
 fn canvas(path: &Path, height: u32) -> Result<DrawingArea<SVGBackend<'_>, Shift>> {
-    let root = SVGBackend::new(path, (960, height)).into_drawing_area();
+    let root = SVGBackend::new(path, (720, height)).into_drawing_area();
     root.fill(&WHITE)?;
     Ok(root)
 }
@@ -80,9 +74,9 @@ pub fn lines(
     }
     let x = range(series.iter().flat_map(|s| s.points.iter().map(|p| p.0)))?;
     let y = range(series.iter().flat_map(|s| s.points.iter().map(|p| p.1)))?;
-    let root = canvas(path, 560)?;
+    let root = canvas(path, 420)?;
     let mut chart = ChartBuilder::on(&root)
-        .caption(title, (FONT, 24).into_font().color(&INK))
+        .caption(title, (FONT, 20).into_font().color(&INK))
         .margin(24)
         .x_label_area_size(48)
         .y_label_area_size(72)
@@ -91,28 +85,37 @@ pub fn lines(
         .configure_mesh()
         .x_desc(x_label)
         .y_desc(y_label)
-        .label_style((FONT, 14).into_font().color(&INK))
-        .axis_desc_style((FONT, 16).into_font().color(&INK))
+        .label_style((FONT, 15).into_font().color(&INK))
+        .axis_desc_style((FONT, 17).into_font().color(&INK))
         .axis_style(INK)
-        .light_line_style(TRANSPARENT)
-        .bold_line_style(GRID)
+        .disable_mesh()
         .draw()?;
-    for (i, series) in series.iter().enumerate() {
-        let color = COLORS[i % COLORS.len()];
+    for (i, item) in series.iter().enumerate() {
+        let color = color(i, series.len());
         chart
             .draw_series(LineSeries::new(
-                series.points.iter().copied(),
-                color.stroke_width(2),
+                item.points.iter().copied(),
+                color.stroke_width(LINE_WIDTH),
             ))?
-            .label(&series.label)
-            .legend(move |(x, y)| PathElement::new([(x, y), (x + 24, y)], color.stroke_width(2)));
+            .label(&item.label)
+            .legend(move |(x, y)| {
+                PathElement::new([(x, y), (x + 24, y)], color.stroke_width(LINE_WIDTH))
+            });
+        if item.points.len() <= 100 {
+            chart.draw_series(
+                item.points
+                    .iter()
+                    .map(|&p| Circle::new(p, MARKER_RADIUS, color.filled())),
+            )?;
+        }
     }
     chart
         .configure_series_labels()
-        .background_style(WHITE.mix(0.95))
-        .border_style(GRID)
-        .label_font((FONT, 14))
+        .background_style(WHITE)
+        .border_style(LEGEND_BORDER)
+        .label_font((FONT, 15))
         .draw()?;
+    frame(&root, chart.plotting_area())?;
     root.present()?;
     Ok(())
 }
@@ -127,9 +130,9 @@ pub fn nelo(path: &Path, title: &str, estimates: &[Estimate]) -> Result<()> {
         return Err("expected finite estimates with lower <= nelo <= upper".into());
     }
     let x = range(std::iter::once(0.0).chain(estimates.iter().flat_map(|e| [e.lower, e.upper])))?;
-    let root = canvas(path, (180 + estimates.len() as u32 * 64).max(360))?;
+    let root = canvas(path, (160 + estimates.len() as u32 * 48).max(300))?;
     let mut chart = ChartBuilder::on(&root)
-        .caption(title, (FONT, 24).into_font().color(&INK))
+        .caption(title, (FONT, 20).into_font().color(&INK))
         .margin(24)
         .x_label_area_size(48)
         .y_label_area_size(180)
@@ -138,11 +141,10 @@ pub fn nelo(path: &Path, title: &str, estimates: &[Estimate]) -> Result<()> {
         .configure_mesh()
         .x_desc("nElo (95% CI)")
         .y_labels(0)
-        .label_style((FONT, 14).into_font().color(&INK))
-        .axis_desc_style((FONT, 16).into_font().color(&INK))
+        .label_style((FONT, 15).into_font().color(&INK))
+        .axis_desc_style((FONT, 17).into_font().color(&INK))
         .axis_style(INK)
-        .light_line_style(TRANSPARENT)
-        .bold_line_style(GRID)
+        .disable_mesh()
         .draw()?;
     chart.draw_series(std::iter::once(PathElement::new(
         [(0.0, -0.5), (0.0, estimates.len() as f64 - 0.5)],
@@ -150,24 +152,24 @@ pub fn nelo(path: &Path, title: &str, estimates: &[Estimate]) -> Result<()> {
     )))?;
     for (i, estimate) in estimates.iter().enumerate() {
         let y = (estimates.len() - i - 1) as f64;
-        let color = COLORS[i % COLORS.len()];
+        let color = color(i, estimates.len());
         chart.draw_series([
             PathElement::new(
                 [(estimate.lower, y), (estimate.upper, y)],
-                color.stroke_width(2),
+                color.stroke_width(LINE_WIDTH),
             ),
             PathElement::new(
                 [(estimate.lower, y - 0.1), (estimate.lower, y + 0.1)],
-                color.stroke_width(2),
+                color.stroke_width(LINE_WIDTH),
             ),
             PathElement::new(
                 [(estimate.upper, y - 0.1), (estimate.upper, y + 0.1)],
-                color.stroke_width(2),
+                color.stroke_width(LINE_WIDTH),
             ),
         ])?;
         chart.draw_series(std::iter::once(Circle::new(
             (estimate.nelo, y),
-            5,
+            MARKER_RADIUS,
             color.filled(),
         )))?;
         let (_, pixel_y) = chart.backend_coord(&(estimate.nelo, y));
@@ -177,6 +179,7 @@ pub fn nelo(path: &Path, title: &str, estimates: &[Estimate]) -> Result<()> {
             (FONT, 15).into_font().color(&INK),
         ))?;
     }
+    frame(&root, chart.plotting_area())?;
     root.present()?;
     Ok(())
 }
@@ -194,9 +197,9 @@ pub fn sweep(path: &Path, title: &str, x_label: &str, points: &[SweepPoint]) -> 
     points.sort_by(|a, b| a.x.total_cmp(&b.x));
     let x = range(points.iter().map(|p| p.x))?;
     let y = range(std::iter::once(0.0).chain(points.iter().flat_map(|p| [p.lower, p.upper])))?;
-    let root = canvas(path, 560)?;
+    let root = canvas(path, 420)?;
     let mut chart = ChartBuilder::on(&root)
-        .caption(title, (FONT, 24).into_font().color(&INK))
+        .caption(title, (FONT, 20).into_font().color(&INK))
         .margin(24)
         .x_label_area_size(48)
         .y_label_area_size(72)
@@ -205,20 +208,19 @@ pub fn sweep(path: &Path, title: &str, x_label: &str, points: &[SweepPoint]) -> 
         .configure_mesh()
         .x_desc(x_label)
         .y_desc("nElo (95% CI)")
-        .label_style((FONT, 14).into_font().color(&INK))
-        .axis_desc_style((FONT, 16).into_font().color(&INK))
+        .label_style((FONT, 15).into_font().color(&INK))
+        .axis_desc_style((FONT, 17).into_font().color(&INK))
         .axis_style(INK)
-        .light_line_style(TRANSPARENT)
-        .bold_line_style(GRID)
+        .disable_mesh()
         .draw()?;
     chart.draw_series(std::iter::once(PathElement::new(
         [(x.start, 0.0), (x.end, 0.0)],
         INK.mix(0.4),
     )))?;
-    let color = COLORS[0];
+    let color = color(0, 1);
     chart.draw_series(LineSeries::new(
         points.iter().map(|p| (p.x, p.nelo)),
-        color.mix(0.5).stroke_width(2),
+        color.stroke_width(LINE_WIDTH),
     ))?;
     chart.draw_series(points.iter().map(|p| {
         ErrorBar::new_vertical(
@@ -226,10 +228,11 @@ pub fn sweep(path: &Path, title: &str, x_label: &str, points: &[SweepPoint]) -> 
             p.lower,
             p.nelo,
             p.upper,
-            color.filled().stroke_width(2),
+            color.filled().stroke_width(LINE_WIDTH),
             10,
         )
     }))?;
+    frame(&root, chart.plotting_area())?;
     root.present()?;
     Ok(())
 }
