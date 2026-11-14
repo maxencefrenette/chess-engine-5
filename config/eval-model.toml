@@ -1,4 +1,4 @@
-baseline_dir = "/data/chess/chess-engine-5/models/transformer-value-2026.11.12/pooled-more-labels"
+baseline_dir = "/data/chess/chess-engine-5/models/visits-sweep-2026.11.13/1000/candidate"
 opening_book = "UHO_Lichess_4560_v1.epd"
 device = "cuda"
 batch = 128

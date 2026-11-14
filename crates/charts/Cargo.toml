@@ -1,0 +1,8 @@
+[package]
+name = "chess-charts"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+csv = "1"
+plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series", "errorbar"] }

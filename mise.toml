@@ -35,3 +35,7 @@ run = "mise run with-cuda -- cargo run --release --locked -p chess-trainer --fea
 [tasks.datagen]
 description = "Generate self-play games and write Parquet shards"
 run = "mise run with-cuda -- cargo run --release --locked -p chess-engine --features cuda -- self-play"
+
+[tasks.charts]
+description = "Generate consistent SVG charts for experiment reports"
+run = "cargo run --quiet --locked -p chess-charts --"

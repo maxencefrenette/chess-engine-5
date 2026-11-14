@@ -1,11 +1,11 @@
-model = "/data/chess/chess-engine-5/models/transformer-value-2026.11.12/pooled-more-labels"
+model = "/data/chess/chess-engine-5/models/visits-sweep-2026.11.13/1000/candidate"
 output_dir = "/data/chess/chess-engine-5/training-data"
 device = "cuda"
-total_games = 2000
+total_games = 2500
 games_per_shard = 500
 batch = 128
 leaves_per_game = 4
-visits_per_move = 1200
+visits_per_move = 1000
 playout_cap = { mode = "disabled" }
 seed = 42
 temperature = 1.0
