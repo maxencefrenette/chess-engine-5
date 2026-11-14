@@ -1,4 +1,4 @@
-model = "/data/chess/chess-engine-5/models/visits-sweep-2026.11.13/1000/candidate"
+model = "/data/chess/chess-engine-5/models/sixty-minute-baseline-2026.11.13/candidate"
 output_dir = "/data/chess/chess-engine-5/training-data"
 device = "cuda"
 total_games = 2500
