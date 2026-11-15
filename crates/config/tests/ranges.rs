@@ -60,3 +60,24 @@ fn one_sided_ranges_have_no_artificial_upper_bound() -> Result<(), Box<dyn std::
     }
     Ok(())
 }
+
+#[toml_config]
+#[derive(Debug, serde::Serialize)]
+struct SinglePrecision {
+    #[range(min = 0.0)]
+    value: f32,
+}
+
+#[test]
+fn f32_ranges_reject_overflow_and_nonfinite_values() -> Result<(), Box<dyn std::error::Error>> {
+    for raw in ["0", "0.5", "3.4028235e38"] {
+        let config: SinglePrecision = toml::from_str(&format!("value = {raw}"))?;
+        assert!(config.value.is_finite());
+        let restored: SinglePrecision = toml::from_str(&toml::to_string(&config)?)?;
+        assert_eq!(restored.value, config.value);
+    }
+    for raw in ["-0.1", "1e39", "inf", "-inf", "nan"] {
+        assert!(toml::from_str::<SinglePrecision>(&format!("value = {raw}")).is_err());
+    }
+    Ok(())
+}

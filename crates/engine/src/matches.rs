@@ -69,6 +69,7 @@ pub struct Options {
     pub baseline_dir: PathBuf,
     opening_book: String,
     pub device: chess_config::DeviceConfig,
+    #[range(min = 0.0)]
     pub loss_stddev: f64,
     batch: u16,
     leaves_per_game: NonZeroU16,
@@ -271,7 +272,7 @@ pub fn run(
             for _ in 0..options.leaves_per_game.get() {
                 let Some(leaf) =
                     slot.search
-                        .next_leaf(&slot.game, visits[side], settings.exploration as f32)
+                        .next_leaf(&slot.game, visits[side], settings.exploration)
                 else {
                     break;
                 };

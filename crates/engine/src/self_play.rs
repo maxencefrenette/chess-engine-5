@@ -142,7 +142,7 @@ fn play_games(
                 let Some(leaf) = slot.search.next_leaf(
                     &slot.game,
                     NonZeroU32::from(visits),
-                    settings.exploration as f32,
+                    settings.exploration,
                 ) else {
                     break;
                 };

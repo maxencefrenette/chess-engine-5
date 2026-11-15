@@ -14,7 +14,7 @@ pub fn derive_toml_config(input: TokenStream) -> TokenStream {
 }
 
 /// Derive strict TOML deserialization for a struct or enum.
-/// On f64 fields, `#[range(min = 0.0, max_exclusive = 1.0)]` validates
+/// On f32 or f64 fields, `#[range(min = 0.0, max_exclusive = 1.0)]` validates
 /// finite values during deserialization. Either endpoint may be omitted;
 /// `min_exclusive` and `max` select the other endpoint conventions.
 #[proc_macro_attribute]
@@ -81,10 +81,11 @@ fn expand_config(item: &mut DeriveInput) -> syn::Result<proc_macro2::TokenStream
             if !ranged {
                 continue;
             }
-            if !matches!(&field.ty, syn::Type::Path(ty) if ty.path.is_ident("f64")) {
+            if !matches!(&field.ty, syn::Type::Path(ty) if ty.path.is_ident("f64") || ty.path.is_ident("f32"))
+            {
                 return Err(syn::Error::new_spanned(
                     &field.ty,
-                    "range requires an f64 field",
+                    "range requires an f32 or f64 field",
                 ));
             }
             if checks.is_empty() {
@@ -103,10 +104,11 @@ fn expand_config(item: &mut DeriveInput) -> syn::Result<proc_macro2::TokenStream
             field
                 .attrs
                 .push(syn::parse_quote!(#[serde(deserialize_with = #path)]));
+            let ty = &field.ty;
             helpers.push(quote! {
                 #[allow(non_snake_case, clippy::manual_range_contains)]
-                fn #helper<'de, D: ::serde::Deserializer<'de>>(deserializer: D) -> ::std::result::Result<f64, D::Error> {
-                    let value = <f64 as ::serde::Deserialize>::deserialize(deserializer)?;
+                fn #helper<'de, D: ::serde::Deserializer<'de>>(deserializer: D) -> ::std::result::Result<#ty, D::Error> {
+                    let value = <#ty as ::serde::Deserialize>::deserialize(deserializer)?;
                     if value.is_finite() #(&& #checks)* {
                         Ok(value)
                     } else {

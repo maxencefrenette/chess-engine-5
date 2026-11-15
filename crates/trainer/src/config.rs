@@ -27,6 +27,7 @@ pub struct Config {
 pub(crate) struct CurriculumStep {
     pub(crate) dataset: PathBuf,
     pub(crate) num_positions: NonZeroUsize,
+    #[range(min_exclusive = 0.0)]
     pub(crate) epochs: f64,
 }
 
