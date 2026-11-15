@@ -1,7 +1,7 @@
 use std::{fmt::Write, fs, time::Instant};
 
 use candle_core::{DType, Device, Tensor};
-use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap, ops::log_softmax};
+use candle_nn::{AdamW, Optimizer, VarBuilder, VarMap, ops::log_softmax};
 use chess_network::{Net, checkpoint};
 use rand::{SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha8Rng;
@@ -65,12 +65,6 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     if curriculum.is_empty() {
         return Err("curriculum must contain at least one phase".into());
     }
-    if !value_loss_weight.is_finite() || value_loss_weight <= 0.0 {
-        return Err("value_loss_weight must be positive and finite".into());
-    }
-    if !adamw.learning_rate.is_finite() || adamw.learning_rate <= 0. {
-        return Err("training optimizer.learning_rate must be positive and finite".into());
-    }
     if output_dir.exists() {
         return Err(format!("output already exists: {}", output_dir.display()).into());
     }
@@ -85,7 +79,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
                 &step.dataset,
                 seed,
                 step.num_positions.get(),
-                value_sample_rate.get(),
+                value_sample_rate,
                 index + 1 == curriculum.len(),
                 &mut rescorer,
             )
@@ -142,16 +136,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         VarBuilder::from_varmap(&parameters, DType::F32, device),
         model,
     )?;
-    let mut optimizer = AdamW::new(
-        parameters.all_vars(),
-        ParamsAdamW {
-            lr: adamw.learning_rate,
-            beta1: adamw.beta1.get(),
-            beta2: adamw.beta2.get(),
-            eps: adamw.eps,
-            weight_decay: adamw.weight_decay,
-        },
-    )?;
+    let mut optimizer = AdamW::new(parameters.all_vars(), adamw.into())?;
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut history = Vec::with_capacity(planned_steps.div_ceil(METRICS_INTERVAL));
     device.synchronize()?;

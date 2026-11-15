@@ -1,8 +1,7 @@
 use std::{num::NonZeroUsize, path::PathBuf};
 
-use chess_config::{BoundedFloat, Exclusive, Inclusive};
 use chess_network::ModelConfig;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::data::Result;
 
@@ -14,7 +13,9 @@ pub struct Config {
     pub(crate) batch_size: NonZeroUsize,
     pub(crate) optimizer: OptimizerConfig,
     pub(crate) seed: u64,
-    pub(crate) value_sample_rate: BoundedFloat<0, 1, Exclusive, Inclusive>,
+    #[range(min_exclusive = 0.0, max = 1.0)]
+    pub(crate) value_sample_rate: f64,
+    #[range(min_exclusive = 0.0)]
     pub(crate) value_loss_weight: f64,
     pub(crate) value_rescoring: RescoringConfig,
     pub(crate) curriculum: Vec<CurriculumStep>,
@@ -51,21 +52,41 @@ pub(crate) enum OptimizerConfig {
 #[chess_config::toml_config]
 #[derive(serde::Serialize)]
 pub(crate) struct AdamWConfig {
+    #[range(min_exclusive = 0.0)]
     pub(crate) learning_rate: f64,
-    pub(crate) beta1: BoundedFloat<0, 1, Inclusive, Exclusive>,
-    pub(crate) beta2: BoundedFloat<0, 1, Inclusive, Exclusive>,
+    #[range(min = 0.0, max_exclusive = 1.0)]
+    pub(crate) beta1: f64,
+    #[range(min = 0.0, max_exclusive = 1.0)]
+    pub(crate) beta2: f64,
+    #[range(min_exclusive = 0.0)]
     pub(crate) eps: f64,
+    #[range(min = 0.0)]
     pub(crate) weight_decay: f64,
     pub(crate) schedule: Schedule,
 }
 
-#[derive(serde::Deserialize, serde::Serialize)]
-#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+impl From<&AdamWConfig> for candle_nn::ParamsAdamW {
+    fn from(config: &AdamWConfig) -> Self {
+        Self {
+            lr: config.learning_rate,
+            beta1: config.beta1,
+            beta2: config.beta2,
+            eps: config.eps,
+            weight_decay: config.weight_decay,
+        }
+    }
+}
+
+#[chess_config::toml_config]
+#[derive(serde::Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
 pub(crate) enum Schedule {
     Constant {},
     Cosine {
-        warmup_fraction: BoundedFloat<0, 1, Inclusive, Exclusive>,
-        min_ratio: BoundedFloat<0, 1, Inclusive, Inclusive>,
+        #[range(min = 0.0, max_exclusive = 1.0)]
+        warmup_fraction: f64,
+        #[range(min = 0.0, max = 1.0)]
+        min_ratio: f64,
     },
 }
 
@@ -77,29 +98,30 @@ impl Schedule {
                 warmup_fraction,
                 min_ratio,
             } => {
-                let warmup =
-                    ((steps as f64 * warmup_fraction.get()).round() as usize).min(steps - 1);
+                let warmup = ((steps as f64 * warmup_fraction).round() as usize).min(steps - 1);
                 if step < warmup {
                     (step + 1) as f64 / warmup as f64
                 } else {
                     let progress = (step - warmup) as f64 / (steps - warmup - 1).max(1) as f64;
-                    min_ratio.get()
-                        + (1.0 - min_ratio.get()) * (1.0 + (std::f64::consts::PI * progress).cos())
-                            / 2.0
+                    min_ratio
+                        + (1.0 - min_ratio) * (1.0 + (std::f64::consts::PI * progress).cos()) / 2.0
                 }
             }
         }
     }
 }
 
-#[derive(Deserialize, Serialize)]
-#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+#[chess_config::toml_config]
+#[derive(Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
 pub(crate) enum RescoringConfig {
     Disabled,
     Chesstb {
         directory: PathBuf,
-        policy_mix: BoundedFloat<0, 1, Inclusive, Inclusive>,
-        value_mix: BoundedFloat<0, 1, Inclusive, Inclusive>,
+        #[range(min = 0.0, max = 1.0)]
+        policy_mix: f64,
+        #[range(min = 0.0, max = 1.0)]
+        value_mix: f64,
     },
 }
 
@@ -127,8 +149,8 @@ mod tests {
     #[test]
     fn cosine_schedule_warms_up_and_reaches_its_floor() -> Result<()> {
         let schedule = Schedule::Cosine {
-            warmup_fraction: 0.05.try_into()?,
-            min_ratio: 0.1.try_into()?,
+            warmup_fraction: 0.05,
+            min_ratio: 0.1,
         };
         assert_eq!(schedule.multiplier(0, 100), 0.2);
         assert_eq!(schedule.multiplier(4, 100), 1.0);

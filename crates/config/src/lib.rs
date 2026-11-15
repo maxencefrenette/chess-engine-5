@@ -1,9 +1,5 @@
 use std::{error::Error, fs};
 
-mod bounded_float;
-
-pub use bounded_float::{BoundedFloat, Endpoint, Exclusive, Inclusive};
-
 pub use chess_config_derive::{TomlConfig, toml_config};
 use serde::de::DeserializeOwned;
 use toml::{Table, Value};

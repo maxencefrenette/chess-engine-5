@@ -266,8 +266,8 @@ mod tests {
         let mut disabled = crate::config::RescoringConfig::Disabled.open()?;
         let mut enabled = crate::config::RescoringConfig::Chesstb {
             directory: "/data/chess/tablebases/chesstb-5".into(),
-            policy_mix: 0.0.try_into()?,
-            value_mix: 1.0.try_into()?,
+            policy_mix: 0.0,
+            value_mix: 1.0,
         }
         .open()?;
         let original = load(directory.path(), 42, 6, 0.5, true, &mut disabled)?;

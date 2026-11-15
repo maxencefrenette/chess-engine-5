@@ -29,8 +29,8 @@ fn row(pieces: &[(usize, u8)], black: bool) -> Row {
 fn tables() -> Result<Rescorer> {
     Ok(RescoringConfig::Chesstb {
         directory: PathBuf::from("/data/chess/tablebases/chesstb-5"),
-        policy_mix: 0.0.try_into()?,
-        value_mix: 1.0.try_into()?,
+        policy_mix: 0.0,
+        value_mix: 1.0,
     }
     .open()?)
 }
@@ -160,8 +160,8 @@ fn repetition_guard_uses_full_game_before_subsampling() {
 fn dtz_boost_prefers_mate_and_does_not_boost_losses() -> Result<()> {
     let mut rescorer = RescoringConfig::Chesstb {
         directory: "/data/chess/tablebases/chesstb-5".into(),
-        policy_mix: 0.5.try_into()?,
-        value_mix: 1.0.try_into()?,
+        policy_mix: 0.5,
+        value_mix: 1.0,
     }
     .open()?;
     let mut winning = row(&[(45, 6), (46, 5), (63, 12)], false);
@@ -211,8 +211,8 @@ fn value_mixture_preserves_endpoints_and_probability_mass() {
 fn soft_rescoring_respects_repetition_guard() -> Result<()> {
     let mut rescorer = RescoringConfig::Chesstb {
         directory: "/data/chess/tablebases/chesstb-5".into(),
-        policy_mix: 0.0.try_into()?,
-        value_mix: 0.25.try_into()?,
+        policy_mix: 0.0,
+        value_mix: 0.25,
     }
     .open()?;
     let mut winning = row(&[(0, 6), (9, 5), (47, 12)], false);

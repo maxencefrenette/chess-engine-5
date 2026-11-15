@@ -10,8 +10,8 @@ fn check_fishtest_reference(
     let config = Config {
         lower_nelo: bounds[0],
         upper_nelo: bounds[1],
-        alpha: errors[0].try_into()?,
-        beta: errors[1].try_into()?,
+        alpha: errors[0],
+        beta: errors[1],
     };
     let llr = config.llr(counts).unwrap();
     assert!(
@@ -94,8 +94,8 @@ fn validates_config_and_handles_no_results() -> Result<(), Box<dyn std::error::E
     let mut config = Config {
         lower_nelo: 0.,
         upper_nelo: 20.,
-        alpha: 0.05.try_into()?,
-        beta: 0.05.try_into()?,
+        alpha: 0.05,
+        beta: 0.05,
     };
     assert!(config.validate());
     assert_eq!(config.llr([0; 5]).unwrap(), 0.0);
@@ -106,7 +106,7 @@ fn validates_config_and_handles_no_results() -> Result<(), Box<dyn std::error::E
     config.upper_nelo = f64::NAN;
     assert!(!config.validate());
     config.upper_nelo = 20.;
-    config.alpha = 0.95.try_into()?;
+    config.alpha = 0.95;
     assert!(!config.validate());
     Ok(())
 }

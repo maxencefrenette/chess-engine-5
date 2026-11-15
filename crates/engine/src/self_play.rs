@@ -29,18 +29,20 @@ pub struct Config {
     leaves_per_game: NonZeroUsize,
     visits_per_move: NonZeroU16,
     seed: u64,
+    #[range(min = 0.0)]
     temperature: f64,
     playout_cap: PlayoutCap,
 }
 
-#[derive(Clone, Copy, serde::Deserialize, serde::Serialize)]
-#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+#[chess_config::toml_config]
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
 enum PlayoutCap {
     Disabled {},
     Enabled {
         fast_visits: NonZeroU16,
-        full_search_rate:
-            chess_config::BoundedFloat<0, 1, chess_config::Exclusive, chess_config::Inclusive>,
+        #[range(min_exclusive = 0.0, max = 1.0)]
+        full_search_rate: f64,
     },
 }
 
@@ -118,7 +120,7 @@ fn play_games(
         PlayoutCap::Enabled {
             fast_visits,
             full_search_rate,
-        } => (fast_visits, full_search_rate.get()),
+        } => (fast_visits, full_search_rate),
     };
     let mut completed = Vec::with_capacity(ids.len());
     let mut active: Vec<_> = ids
@@ -186,9 +188,6 @@ fn play_games(
 }
 
 pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) -> Result<PathBuf> {
-    if !config.temperature.is_finite() || config.temperature < 0.0 {
-        return Err("self-play temperature must be finite and nonnegative".into());
-    }
     if let PlayoutCap::Enabled { fast_visits, .. } = config.playout_cap
         && fast_visits >= config.visits_per_move
     {
@@ -287,7 +286,7 @@ mod tests {
             PlayoutCap::Disabled {},
             PlayoutCap::Enabled {
                 fast_visits: NonZeroU16::new(1).unwrap(),
-                full_search_rate: 0.5.try_into()?,
+                full_search_rate: 0.5,
             },
         ] {
             config.playout_cap = cap;

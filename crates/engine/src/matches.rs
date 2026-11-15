@@ -412,8 +412,8 @@ mod tests {
         let config = sprt::Config {
             lower_nelo: 0.0,
             upper_nelo: 20.0,
-            alpha: 0.05.try_into()?,
-            beta: 0.05.try_into()?,
+            alpha: 0.05,
+            beta: 0.05,
         };
         assert_eq!(
             nelo_summary(counts, Some(&config)),
