@@ -1,13 +1,16 @@
-use std::{fmt::Write, fs, num::NonZeroUsize, path::PathBuf, time::Instant};
+use std::{fmt::Write, fs, time::Instant};
 
 use candle_core::{DType, Device, Tensor};
-use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap, loss, ops::log_softmax};
-use chess_network::{ModelConfig, Net, checkpoint};
+use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap, ops::log_softmax};
+use chess_network::{Net, checkpoint};
 use rand::{SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha8Rng;
 use serde_json::json;
 
-use crate::data::{self, Batch, Result};
+use crate::{
+    config::{Config, OptimizerConfig, Schedule},
+    data::{self, Batch, Result},
+};
 
 const GENERATION_BUDGET_WEIGHT: f64 = 1.0;
 const METRICS_INTERVAL: usize = 10;
@@ -22,87 +25,11 @@ struct TrainingSample {
     epoch: usize,
 }
 
-#[chess_config::toml_config]
-#[derive(serde::Serialize)]
-pub struct Config {
-    output_dir: PathBuf,
-    pub device: chess_config::DeviceConfig,
-    batch_size: NonZeroUsize,
-    optimizer: OptimizerConfig,
-    seed: u64,
-    value_sample_rate: f64,
-    value_loss_weight: f64,
-    curriculum: Vec<CurriculumStep>,
-    model: ModelConfig,
-}
-
-#[chess_config::toml_config]
-#[derive(serde::Serialize)]
-struct CurriculumStep {
-    dataset: PathBuf,
-    num_positions: NonZeroUsize,
-    epochs: f64,
-}
-
-impl CurriculumStep {
-    fn optimizer_steps(&self, positions: usize, batch_size: usize) -> Result<usize> {
-        let batches_per_epoch = positions.div_ceil(batch_size);
-        let steps = (self.epochs * batches_per_epoch as f64).floor();
-        if !(1.0..usize::MAX as f64).contains(&steps) {
-            return Err(
-                "curriculum epochs must schedule at least one batch and fit in usize".into(),
-            );
-        }
-        Ok(steps as usize)
-    }
-}
-
-#[derive(serde::Deserialize, serde::Serialize)]
-#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
-enum OptimizerConfig {
-    Adamw(AdamWConfig),
-}
-
-#[chess_config::toml_config]
-#[derive(serde::Serialize)]
-struct AdamWConfig {
-    learning_rate: f64,
-    beta1: f64,
-    beta2: f64,
-    eps: f64,
-    weight_decay: f64,
-    schedule: Schedule,
-}
-
-#[derive(serde::Deserialize, serde::Serialize)]
-#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
-enum Schedule {
-    Constant {},
-    Cosine {
-        warmup_fraction: f64,
-        min_ratio: f64,
-    },
-}
-
-impl Schedule {
-    fn multiplier(&self, step: usize, steps: usize) -> f64 {
-        match *self {
-            Self::Constant {} => 1.0,
-            Self::Cosine {
-                warmup_fraction,
-                min_ratio,
-            } => {
-                let warmup = ((steps as f64 * warmup_fraction).round() as usize).min(steps - 1);
-                if step < warmup {
-                    (step + 1) as f64 / warmup as f64
-                } else {
-                    let progress = (step - warmup) as f64 / (steps - warmup - 1).max(1) as f64;
-                    min_ratio
-                        + (1.0 - min_ratio) * (1.0 + (std::f64::consts::PI * progress).cos()) / 2.0
-                }
-            }
-        }
-    }
+fn soft_value_loss(logits: &Tensor, targets: &Tensor) -> candle_core::Result<Tensor> {
+    (log_softmax(logits, 1)? * targets)?
+        .sum(1)?
+        .neg()?
+        .mean_all()
 }
 
 fn losses(net: &Net, batch: &Batch) -> candle_core::Result<[Tensor; 2]> {
@@ -114,7 +41,7 @@ fn losses(net: &Net, batch: &Batch) -> candle_core::Result<[Tensor; 2]> {
             Some(indices) => wdl.index_select(indices, 0)?,
             None => wdl,
         };
-        loss::cross_entropy(&wdl, targets)?
+        soft_value_loss(&wdl, targets)?
     } else {
         Tensor::zeros((), policy.dtype(), policy.device())?
     };
@@ -160,6 +87,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     }
     let setup_started = Instant::now();
     data::check_disjoint(curriculum.iter().map(|step| step.dataset.as_path()))?;
+    let mut rescorer = config.value_rescoring.open()?;
     let datasets = curriculum
         .iter()
         .enumerate()
@@ -170,10 +98,15 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
                 step.num_positions.get(),
                 value_sample_rate,
                 index + 1 == curriculum.len(),
+                &mut rescorer,
             )
             .map_err(|error| format!("dataset {}: {error}", step.dataset.display()).into())
         })
         .collect::<Result<Vec<_>>>()?;
+    println!(
+        "tablebase rescoring: {} value labels probed, {} changed",
+        rescorer.stats.probed, rescorer.stats.changed
+    );
     let phase_steps = curriculum
         .iter()
         .zip(&datasets)
@@ -344,7 +277,9 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     let net = Net::new(builder, model)?;
     let mut counts = [1.; 3];
     for row in datasets.iter().flat_map(|data| &data.train) {
-        counts[row.value as usize] += 1.;
+        for (count, &probability) in counts.iter_mut().zip(&row.value) {
+            *count += f64::from(probability);
+        }
     }
     let count_sum = counts.iter().sum::<f64>();
     let mut totals = [0.; 3];
@@ -357,7 +292,9 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         }
         totals[2] += batch.uniform_loss;
         for &row in chunk {
-            value_baseline -= (counts[held_out.test[row].value as usize] / count_sum).ln();
+            for (count, probability) in counts.iter().zip(held_out.test[row].value) {
+                value_baseline -= f64::from(probability) * (count / count_sum).ln();
+            }
         }
     }
     let test_count = held_out.test.len() as f64;
@@ -391,6 +328,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         "train_games": train_games,
         "train_positions": train_positions,
         "value_train_positions": value_label_count,
+        "tablebase_rescoring": rescorer.stats,
         "value_train_games": value_labels.len(),
         "value_labels_per_game_p90": value_p90,
         "test_game_ids": held_out.test_ids,
@@ -449,33 +387,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn curriculum_epochs_skip_fractional_steps() -> Result<()> {
-        let config = Config::from_repo_file("training.toml")?;
-        let mut step = config.curriculum.into_iter().next().unwrap();
-        step.epochs = 2.0;
-        assert_eq!(step.optimizer_steps(129, 128)?, 4);
-        step.epochs = 1.25;
-        assert_eq!(step.optimizer_steps(129, 128)?, 2);
-        step.epochs = 1.75;
-        assert_eq!(step.optimizer_steps(129, 128)?, 3);
-        step.epochs = 0.8;
-        assert_eq!(step.optimizer_steps(640, 128)?, 4);
-        step.epochs = 0.0;
-        assert!(step.optimizer_steps(129, 128).is_err());
+    fn soft_wdl_loss_matches_weighted_hard_losses_and_gradients() -> Result<()> {
+        let device = &Device::Cpu;
+        let logits =
+            candle_core::Var::from_slice(&[0.3f32, -0.8, 1.2, -0.4, 0.7, 0.2], (2, 3), device)?;
+        let original = Tensor::new(&[1u32, 0], device)?;
+        let rescored = Tensor::new(&[2u32, 1], device)?;
+        for mix in [0f64, 0.25, 1.] {
+            let targets = Tensor::new(
+                &[
+                    [0f32, (1. - mix) as f32, mix as f32],
+                    [(1. - mix) as f32, mix as f32, 0.],
+                ],
+                device,
+            )?;
+            let soft = soft_value_loss(&logits, &targets)?;
+            let hard = ((candle_nn::loss::cross_entropy(&logits, &original)? * (1. - mix))?
+                + (candle_nn::loss::cross_entropy(&logits, &rescored)? * mix)?)?;
+            assert!((soft.to_scalar::<f32>()? - hard.to_scalar::<f32>()?).abs() < 1e-6);
+            let sg = soft.backward()?;
+            let hg = hard.backward()?;
+            let sg = sg.get(&logits).unwrap().flatten_all()?.to_vec1::<f32>()?;
+            let hg = hg.get(&logits).unwrap().flatten_all()?.to_vec1::<f32>()?;
+            assert!(sg.iter().zip(hg).all(|(a, b)| (a - b).abs() < 1e-6));
+        }
         Ok(())
-    }
-
-    #[test]
-    fn cosine_schedule_warms_up_and_reaches_its_floor() {
-        let schedule = Schedule::Cosine {
-            warmup_fraction: 0.05,
-            min_ratio: 0.1,
-        };
-        assert_eq!(schedule.multiplier(0, 100), 0.2);
-        assert_eq!(schedule.multiplier(4, 100), 1.0);
-        assert_eq!(schedule.multiplier(5, 100), 1.0);
-        assert!(schedule.multiplier(50, 100) < 1.0);
-        assert!((schedule.multiplier(99, 100) - 0.1).abs() < 1e-12);
     }
 
     #[test]
@@ -523,7 +459,7 @@ mod tests {
         let labels = Tensor::new(&[0_u32, 2], device)?;
         let objective = || -> candle_core::Result<Tensor> {
             let (_, wdl) = net.forward(&boards, &moves, &moves, &promotes)?;
-            loss::cross_entropy(&wdl, &labels)
+            candle_nn::loss::cross_entropy(&wdl, &labels)
         };
         // Zero output initialization needs one update before trunk gradients flow.
         SGD::new(params.all_vars(), 0.1)?.backward_step(&objective()?)?;

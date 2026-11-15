@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/engine", "crates/trainer", "crates/network", "crates/data", "crates/config", "crates/config-derive", "crates/lints", "crates/opening-book", "crates/charts"]
+members = ["crates/engine", "crates/trainer", "crates/network", "crates/data", "crates/config", "crates/config-derive", "crates/lints", "crates/opening-book", "crates/charts", "crates/tablebase"]
 default-members = ["crates/engine"]
 resolver = "3"
 

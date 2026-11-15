@@ -2,11 +2,13 @@ use std::{env, error::Error, process::ExitCode};
 
 use chess_config::TomlConfig;
 
+mod config;
 mod data;
+mod rescoring;
 mod train;
 
 fn run() -> Result<(), Box<dyn Error>> {
-    let config = train::Config::load("config/training.toml", env::args().skip(1))?;
+    let config = config::Config::load("config/training.toml", env::args().skip(1))?;
     let device = config.device.try_into()?;
     train::run(config, &device)
 }

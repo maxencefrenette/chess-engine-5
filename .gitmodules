@@ -1,0 +1,3 @@
+[submodule "crates/tablebase/vendor/chesstb"]
+	path = crates/tablebase/vendor/chesstb
+	url = https://github.com/noobpwnftw/chesstb.git

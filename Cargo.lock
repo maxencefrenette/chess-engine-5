@@ -380,6 +380,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "chess-tablebase"
+version = "0.1.0"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "chess-trainer"
 version = "0.1.0"
 dependencies = [
@@ -388,10 +395,12 @@ dependencies = [
  "chess-config",
  "chess-data",
  "chess-network",
+ "chess-tablebase",
  "rand",
  "rand_chacha",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

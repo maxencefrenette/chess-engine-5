@@ -4,6 +4,7 @@ batch_size = 128
 seed = 42
 value_sample_rate = 0.125
 value_loss_weight = 0.03
+value_rescoring = { mode = "disabled" }
 
 [[curriculum]]
 dataset = "/data/chess/chess-engine-5/models/data-crank-2026.11.14/round-01/generation/v2/1794673846689678095-3565240"

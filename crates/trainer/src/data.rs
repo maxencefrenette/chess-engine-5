@@ -14,9 +14,9 @@ use chess_network::{INPUTS, SQUARES, encode_position, policy_inputs::PolicyInput
 
 pub struct Row {
     features: Vec<f32>,
-    moves: Vec<(u16, u16)>,
+    moves: Vec<(u16, f32)>,
     total_visits: f32,
-    pub value: u32,
+    pub value: [f32; 3],
     use_value: bool,
 }
 
@@ -49,6 +49,7 @@ pub fn load(
     train_positions: usize,
     value_sample_rate: f64,
     retain_holdout: bool,
+    rescorer: &mut crate::rescoring::Rescorer,
 ) -> Result<Dataset> {
     let mut rows = Vec::new();
     for shard in discover_shards(dataset)? {
@@ -58,6 +59,7 @@ pub fn load(
         })?;
     }
 
+    let history = crate::rescoring::History::new(&rows);
     let mut games: Vec<_> = rows
         .iter()
         .map(|row| row.game_id)
@@ -106,7 +108,20 @@ pub fn load(
         train: train
             .into_iter()
             .zip(mask)
-            .map(|(row, use_value)| encode_row(row, use_value))
+            .map(|(mut row, use_value)| {
+                let value = if use_value {
+                    let repeated = history.has_repeated(&row);
+                    rescorer.value(&mut row, repeated)?
+                } else {
+                    crate::rescoring::game_value(row.value)
+                };
+                let policy = rescorer.policy(&row)?;
+                let mut encoded = encode_row(row, use_value)?;
+                encoded.total_visits = policy.iter().map(|(_, p)| p).sum();
+                encoded.moves = policy;
+                encoded.value = value;
+                Ok(encoded)
+            })
             .collect::<Result<_>>()?,
         test: test
             .into_iter()
@@ -143,8 +158,13 @@ fn encode_row(row: chess_data::Row, use_value: bool) -> Result<Row> {
             .iter()
             .map(|&(_, visits)| f32::from(visits))
             .sum(),
-        moves: row.position.policy,
-        value: (row.value + 1) as u32,
+        moves: row
+            .position
+            .policy
+            .into_iter()
+            .map(|(m, n)| (m, f32::from(n)))
+            .collect(),
+        value: crate::rescoring::game_value(row.value),
         use_value,
     })
 }
@@ -179,24 +199,24 @@ impl Batch {
         for (i, &row) in indices.iter().enumerate() {
             let row = &rows[row];
             if row.use_value {
-                value.push(row.value);
+                value.extend_from_slice(&row.value);
                 value_indices.push(i as u32);
             }
             uniform_loss += (row.moves.len() as f64).ln();
             for (j, &(_, visits)) in row.moves.iter().enumerate() {
                 let index = i * width + j;
                 mask[index] = 0.;
-                policy[index] = f32::from(visits) / row.total_visits;
+                policy[index] = visits / row.total_visits;
             }
         }
         let shape = (size, width);
-        let value_count = value.len();
+        let value_count = value_indices.len();
         Ok(Self {
             inputs,
             mask: Tensor::from_vec(mask, shape, device)?,
             policy: Tensor::from_vec(policy, shape, device)?,
             value: (value_count > 0)
-                .then(|| Tensor::from_vec(value, value_count, device))
+                .then(|| Tensor::from_vec(value, (value_count, 3), device))
                 .transpose()?,
             value_indices: if (1..size).contains(&value_count) {
                 Some(Tensor::from_vec(value_indices, value_count, device)?)
@@ -206,5 +226,74 @@ impl Batch {
             value_count,
             uniform_loss,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires downloaded ChessTB tables on the HDD"]
+    fn rescoring_only_changes_selected_training_value_targets() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let positions: Vec<_> = (0..2)
+            .map(|ply| {
+                let mut board = [0; 32];
+                for (square, code) in [(0, 6), (9, 5), (47, 12)] {
+                    board[square / 2] |= code << (4 * (square % 2));
+                }
+                chess_data::Position {
+                    ply,
+                    snapshot: chess_data::Board {
+                        board,
+                        castling: 0,
+                        ep_square: 64,
+                        halfmove_clock: 0,
+                        repetitions: 1,
+                    },
+                    policy: vec![(123, 800)],
+                    played_move: 123,
+                }
+            })
+            .collect();
+        chess_data::write_shard(
+            directory.path(),
+            0,
+            (0..4).map(|id| (id, positions.as_slice(), 0)),
+            42,
+        )?;
+        let mut disabled = crate::config::RescoringConfig::Disabled.open()?;
+        let mut enabled = crate::config::RescoringConfig::Chesstb {
+            directory: "/data/chess/tablebases/chesstb-5".into(),
+            policy_mix: chess_config::UnitInterval::new(0.).unwrap(),
+            value_mix: chess_config::UnitInterval::new(1.).unwrap(),
+        }
+        .open()?;
+        let original = load(directory.path(), 42, 6, 0.5, true, &mut disabled)?;
+        let rescored = load(directory.path(), 42, 6, 0.5, true, &mut enabled)?;
+        assert_eq!(original.test_ids, rescored.test_ids);
+        assert_eq!(
+            original.estimated_generation_seconds,
+            rescored.estimated_generation_seconds
+        );
+        assert_eq!(
+            original.value_labels_per_game,
+            rescored.value_labels_per_game
+        );
+        assert_eq!(enabled.stats.probed, 3);
+        assert_eq!(enabled.stats.changed, 3);
+        for (before, after) in original.train.iter().zip(&rescored.train) {
+            assert_eq!(before.features, after.features);
+            assert_eq!(before.moves, after.moves);
+            assert_eq!(before.total_visits, after.total_visits);
+            assert_eq!(before.use_value, after.use_value);
+            assert_eq!(before.value != after.value, after.use_value);
+        }
+        for (before, after) in original.test.iter().zip(&rescored.test) {
+            assert_eq!(before.features, after.features);
+            assert_eq!(before.value, after.value);
+        }
+        Ok(())
     }
 }
