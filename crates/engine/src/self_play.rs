@@ -287,7 +287,7 @@ mod tests {
             PlayoutCap::Disabled {},
             PlayoutCap::Enabled {
                 fast_visits: NonZeroU16::new(1).unwrap(),
-                full_search_rate: chess_config::BoundedFloat::new(0.5).unwrap(),
+                full_search_rate: 0.5.try_into()?,
             },
         ] {
             config.playout_cap = cap;

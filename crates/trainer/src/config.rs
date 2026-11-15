@@ -125,15 +125,16 @@ mod tests {
     }
 
     #[test]
-    fn cosine_schedule_warms_up_and_reaches_its_floor() {
+    fn cosine_schedule_warms_up_and_reaches_its_floor() -> Result<()> {
         let schedule = Schedule::Cosine {
-            warmup_fraction: BoundedFloat::new(0.05).unwrap(),
-            min_ratio: BoundedFloat::new(0.1).unwrap(),
+            warmup_fraction: 0.05.try_into()?,
+            min_ratio: 0.1.try_into()?,
         };
         assert_eq!(schedule.multiplier(0, 100), 0.2);
         assert_eq!(schedule.multiplier(4, 100), 1.0);
         assert_eq!(schedule.multiplier(5, 100), 1.0);
         assert!(schedule.multiplier(50, 100) < 1.0);
         assert!((schedule.multiplier(99, 100) - 0.1).abs() < 1e-12);
+        Ok(())
     }
 }

@@ -407,13 +407,13 @@ mod tests {
     }
 
     #[test]
-    fn reporting_uses_nelo_for_estimates_and_sprt_bounds() {
+    fn reporting_uses_nelo_for_estimates_and_sprt_bounds() -> Result<(), String> {
         let counts = [135, 440, 682, 529, 214];
         let config = sprt::Config {
             lower_nelo: 0.0,
             upper_nelo: 20.0,
-            alpha: chess_config::BoundedFloat::new(0.05).unwrap(),
-            beta: chess_config::BoundedFloat::new(0.05).unwrap(),
+            alpha: 0.05.try_into()?,
+            beta: 0.05.try_into()?,
         };
         assert_eq!(
             nelo_summary(counts, Some(&config)),
@@ -438,6 +438,7 @@ mod tests {
                 "unavailable (insufficient pair-score variation)"
             );
         }
+        Ok(())
     }
 
     #[test]

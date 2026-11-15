@@ -1,4 +1,5 @@
 use super::*;
+use crate::data::Result;
 use std::path::PathBuf;
 
 fn row(pieces: &[(usize, u8)], black: bool) -> Row {
@@ -25,25 +26,13 @@ fn row(pieces: &[(usize, u8)], black: bool) -> Row {
     }
 }
 
-fn tables() -> io::Result<Rescorer> {
-    RescoringConfig::Chesstb {
+fn tables() -> Result<Rescorer> {
+    Ok(RescoringConfig::Chesstb {
         directory: PathBuf::from("/data/chess/tablebases/chesstb-5"),
-        policy_mix: chess_config::BoundedFloat::<
-            0,
-            1,
-            chess_config::Inclusive,
-            chess_config::Inclusive,
-        >::new(0.)
-        .unwrap(),
-        value_mix: chess_config::BoundedFloat::<
-            0,
-            1,
-            chess_config::Inclusive,
-            chess_config::Inclusive,
-        >::new(1.)
-        .unwrap(),
+        policy_mix: 0.0.try_into()?,
+        value_mix: 1.0.try_into()?,
     }
-    .open()
+    .open()?)
 }
 
 #[test]
@@ -62,7 +51,7 @@ fn folds_cursed_and_blessed_classes_into_draws() {
 }
 
 #[test]
-fn serializes_board_orientation_castling_and_en_passant() -> io::Result<()> {
+fn serializes_board_orientation_castling_and_en_passant() -> Result<()> {
     let mut row = row(&[(0, 4), (4, 6), (63, 12), (36, 1), (35, 7)], true);
     row.position.snapshot.castling = 2;
     row.position.snapshot.ep_square = 19;
@@ -75,7 +64,7 @@ fn serializes_board_orientation_castling_and_en_passant() -> io::Result<()> {
 }
 
 #[test]
-fn disabled_rescoring_keeps_data_untouched() -> io::Result<()> {
+fn disabled_rescoring_keeps_data_untouched() -> Result<()> {
     let mut rescorer = RescoringConfig::Disabled.open()?;
     let mut row = row(&[(0, 6), (9, 5), (63, 12)], false);
     rescorer.rescore(&mut row)?;
@@ -86,7 +75,7 @@ fn disabled_rescoring_keeps_data_untouched() -> io::Result<()> {
 
 #[test]
 #[ignore = "requires downloaded ChessTB tables on the HDD"]
-fn downloaded_tables_respect_side_clock_and_castling() -> io::Result<()> {
+fn downloaded_tables_respect_side_clock_and_castling() -> Result<()> {
     let mut rescorer = tables()?;
     // KQK, with colors and side to move varied independently.
     for (pieces, black, expected) in [
@@ -168,23 +157,11 @@ fn repetition_guard_uses_full_game_before_subsampling() {
 
 #[test]
 #[ignore = "requires downloaded ChessTB tables on the HDD"]
-fn dtz_boost_prefers_mate_and_does_not_boost_losses() -> io::Result<()> {
+fn dtz_boost_prefers_mate_and_does_not_boost_losses() -> Result<()> {
     let mut rescorer = RescoringConfig::Chesstb {
         directory: "/data/chess/tablebases/chesstb-5".into(),
-        policy_mix: chess_config::BoundedFloat::<
-            0,
-            1,
-            chess_config::Inclusive,
-            chess_config::Inclusive,
-        >::new(0.5)
-        .unwrap(),
-        value_mix: chess_config::BoundedFloat::<
-            0,
-            1,
-            chess_config::Inclusive,
-            chess_config::Inclusive,
-        >::new(1.)
-        .unwrap(),
+        policy_mix: 0.5.try_into()?,
+        value_mix: 1.0.try_into()?,
     }
     .open()?;
     let mut winning = row(&[(45, 6), (46, 5), (63, 12)], false);
@@ -231,23 +208,11 @@ fn value_mixture_preserves_endpoints_and_probability_mass() {
 
 #[test]
 #[ignore = "requires downloaded ChessTB tables on the HDD"]
-fn soft_rescoring_respects_repetition_guard() -> io::Result<()> {
+fn soft_rescoring_respects_repetition_guard() -> Result<()> {
     let mut rescorer = RescoringConfig::Chesstb {
         directory: "/data/chess/tablebases/chesstb-5".into(),
-        policy_mix: chess_config::BoundedFloat::<
-            0,
-            1,
-            chess_config::Inclusive,
-            chess_config::Inclusive,
-        >::new(0.)
-        .unwrap(),
-        value_mix: chess_config::BoundedFloat::<
-            0,
-            1,
-            chess_config::Inclusive,
-            chess_config::Inclusive,
-        >::new(0.25)
-        .unwrap(),
+        policy_mix: 0.0.try_into()?,
+        value_mix: 0.25.try_into()?,
     }
     .open()?;
     let mut winning = row(&[(0, 6), (9, 5), (47, 12)], false);

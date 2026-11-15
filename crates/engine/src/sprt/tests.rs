@@ -6,12 +6,12 @@ fn check_fishtest_reference(
     counts: [u64; 5],
     expected_llr: f64,
     expected_estimate: Option<[f64; 3]>,
-) {
+) -> Result<(), Box<dyn std::error::Error>> {
     let config = Config {
         lower_nelo: bounds[0],
         upper_nelo: bounds[1],
-        alpha: chess_config::BoundedFloat::new(errors[0]).unwrap(),
-        beta: chess_config::BoundedFloat::new(errors[1]).unwrap(),
+        alpha: errors[0].try_into()?,
+        beta: errors[1].try_into()?,
     };
     let llr = config.llr(counts).unwrap();
     assert!(
@@ -44,13 +44,14 @@ fn check_fishtest_reference(
         (None, None) => {}
         _ => panic!("missing estimate"),
     }
+    Ok(())
 }
 
 macro_rules! fishtest_cases {
     ($($name:ident: ($bounds:expr, $errors:expr, $counts:expr, $llr:expr, $estimate:expr);)*) => {
         $(#[test]
-        fn $name() {
-            check_fishtest_reference($bounds, $errors, $counts, $llr, $estimate);
+        fn $name() -> Result<(), Box<dyn std::error::Error>> {
+            check_fishtest_reference($bounds, $errors, $counts, $llr, $estimate)
         })*
     };
 }
@@ -89,12 +90,12 @@ fishtest_cases! {
 }
 
 #[test]
-fn validates_config_and_handles_no_results() {
+fn validates_config_and_handles_no_results() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = Config {
         lower_nelo: 0.,
         upper_nelo: 20.,
-        alpha: chess_config::BoundedFloat::new(0.05).unwrap(),
-        beta: chess_config::BoundedFloat::new(0.05).unwrap(),
+        alpha: 0.05.try_into()?,
+        beta: 0.05.try_into()?,
     };
     assert!(config.validate());
     assert_eq!(config.llr([0; 5]).unwrap(), 0.0);
@@ -105,8 +106,9 @@ fn validates_config_and_handles_no_results() {
     config.upper_nelo = f64::NAN;
     assert!(!config.validate());
     config.upper_nelo = 20.;
-    config.alpha = chess_config::BoundedFloat::new(0.95).unwrap();
+    config.alpha = 0.95.try_into()?;
     assert!(!config.validate());
+    Ok(())
 }
 
 #[test]

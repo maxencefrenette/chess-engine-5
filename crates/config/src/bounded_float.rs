@@ -48,6 +48,16 @@ impl<const MIN: i32, const MAX: i32, Lower: Endpoint, Upper: Endpoint>
     }
 }
 
+impl<const MIN: i32, const MAX: i32, Lower: Endpoint, Upper: Endpoint> TryFrom<f64>
+    for BoundedFloat<MIN, MAX, Lower, Upper>
+{
+    type Error = String;
+
+    fn try_from(value: f64) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
 impl<const MIN: i32, const MAX: i32, Lower: Endpoint, Upper: Endpoint> std::fmt::Display
     for BoundedFloat<MIN, MAX, Lower, Upper>
 {
@@ -71,6 +81,17 @@ mod tests {
     #[derive(Debug, Deserialize, Serialize)]
     struct Settings {
         value: BoundedFloat<0, 1, Inclusive, Inclusive>,
+    }
+
+    #[test]
+    fn try_into_uses_the_destination_bounds() -> Result<(), String> {
+        let value: BoundedFloat<0, 1, Exclusive, Inclusive> = 0.5.try_into()?;
+        assert_eq!(value.get(), 0.5);
+        for raw in [0.0, -0.1, 1.1, f64::NAN, f64::INFINITY] {
+            let result: Result<BoundedFloat<0, 1, Exclusive, Inclusive>, _> = raw.try_into();
+            assert!(result.is_err());
+        }
+        Ok(())
     }
 
     #[test]
