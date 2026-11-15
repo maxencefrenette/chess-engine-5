@@ -1,4 +1,4 @@
-model = "/data/chess/chess-engine-5/models/sixty-minute-baseline-2026.11.13/candidate"
+model = "/data/chess/chess-engine-5/models/data-crank-2026.11.14/round-01/candidate"
 output_dir = "/data/chess/chess-engine-5/training-data"
 device = "cuda"
 total_games = 2500

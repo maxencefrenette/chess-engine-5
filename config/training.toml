@@ -6,8 +6,8 @@ value_sample_rate = 0.125
 value_loss_weight = 0.03
 
 [[curriculum]]
-dataset = "/data/chess/chess-engine-5/models/visits-sweep-2026.11.13/1000/generation/v2/1794605621199512336-3156288"
-num_positions = 323849
+dataset = "/data/chess/chess-engine-5/models/data-crank-2026.11.14/round-01/generation/v2/1794673846689678095-3565240"
+num_positions = 317840
 epochs = 15.0
 
 [optimizer]
