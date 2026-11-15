@@ -16,8 +16,8 @@ const NORMALIZATION: f64 = 800.0 / std::f64::consts::LN_10;
 pub(crate) struct Config {
     pub lower_nelo: f64,
     pub upper_nelo: f64,
-    pub alpha: f64,
-    pub beta: f64,
+    pub alpha: chess_config::BoundedFloat<0, 1, chess_config::Exclusive, chess_config::Exclusive>,
+    pub beta: chess_config::BoundedFloat<0, 1, chess_config::Exclusive, chess_config::Exclusive>,
 }
 
 impl Config {
@@ -25,16 +25,13 @@ impl Config {
         self.lower_nelo.is_finite()
             && self.upper_nelo.is_finite()
             && self.lower_nelo < self.upper_nelo
-            && self.alpha > 0.0
-            && self.beta > 0.0
-            && self.alpha + self.beta < 1.0
+            && self.alpha.get() + self.beta.get() < 1.0
     }
 
     pub fn boundaries(&self) -> (f64, f64) {
-        (
-            (self.beta / (1.0 - self.alpha)).ln(),
-            ((1.0 - self.beta) / self.alpha).ln(),
-        )
+        let alpha = self.alpha.get();
+        let beta = self.beta.get();
+        ((beta / (1.0 - alpha)).ln(), ((1.0 - beta) / alpha).ln())
     }
 
     pub fn llr(&self, counts: [u64; 5]) -> io::Result<f64> {

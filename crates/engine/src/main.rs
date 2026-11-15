@@ -78,7 +78,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             let model = ModelEvaluator::load(Path::new(&model), device)?;
-            let mut moves = model.search(&game, visits, Settings::load()?.exploration)?;
+            let mut moves = model.search(&game, visits, Settings::load()?.exploration as f32)?;
             moves.sort_by_key(|entry| std::cmp::Reverse(entry.visits));
             for entry in moves {
                 println!("{} {}", entry.mv, entry.visits);

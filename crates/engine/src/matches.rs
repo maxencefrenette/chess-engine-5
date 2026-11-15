@@ -271,7 +271,7 @@ pub fn run(
             for _ in 0..options.leaves_per_game.get() {
                 let Some(leaf) =
                     slot.search
-                        .next_leaf(&slot.game, visits[side], settings.exploration)
+                        .next_leaf(&slot.game, visits[side], settings.exploration as f32)
                 else {
                     break;
                 };
@@ -412,8 +412,8 @@ mod tests {
         let config = sprt::Config {
             lower_nelo: 0.0,
             upper_nelo: 20.0,
-            alpha: 0.05,
-            beta: 0.05,
+            alpha: chess_config::BoundedFloat::new(0.05).unwrap(),
+            beta: chess_config::BoundedFloat::new(0.05).unwrap(),
         };
         assert_eq!(
             nelo_summary(counts, Some(&config)),

@@ -39,7 +39,8 @@ enum PlayoutCap {
     Disabled {},
     Enabled {
         fast_visits: NonZeroU16,
-        full_search_rate: f64,
+        full_search_rate:
+            chess_config::BoundedFloat<0, 1, chess_config::Exclusive, chess_config::Inclusive>,
     },
 }
 
@@ -117,7 +118,7 @@ fn play_games(
         PlayoutCap::Enabled {
             fast_visits,
             full_search_rate,
-        } => (fast_visits, full_search_rate),
+        } => (fast_visits, full_search_rate.get()),
     };
     let mut completed = Vec::with_capacity(ids.len());
     let mut active: Vec<_> = ids
@@ -139,7 +140,7 @@ fn play_games(
                 let Some(leaf) = slot.search.next_leaf(
                     &slot.game,
                     NonZeroU32::from(visits),
-                    settings.exploration,
+                    settings.exploration as f32,
                 ) else {
                     break;
                 };
@@ -188,16 +189,10 @@ pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) ->
     if !config.temperature.is_finite() || config.temperature < 0.0 {
         return Err("self-play temperature must be finite and nonnegative".into());
     }
-    if let PlayoutCap::Enabled {
-        fast_visits,
-        full_search_rate,
-    } = config.playout_cap
-        && (!(full_search_rate > 0.0 && full_search_rate <= 1.0)
-            || fast_visits >= config.visits_per_move)
+    if let PlayoutCap::Enabled { fast_visits, .. } = config.playout_cap
+        && fast_visits >= config.visits_per_move
     {
-        return Err(
-            "playout cap requires a rate in (0, 1] and fewer visits for fast searches".into(),
-        );
+        return Err("playout cap requires fewer visits for fast searches".into());
     }
     let version = config.output_dir.join(format!("v{FORMAT_VERSION}"));
     fs::create_dir_all(&version)?;
@@ -292,7 +287,7 @@ mod tests {
             PlayoutCap::Disabled {},
             PlayoutCap::Enabled {
                 fast_visits: NonZeroU16::new(1).unwrap(),
-                full_search_rate: 0.5,
+                full_search_rate: chess_config::BoundedFloat::new(0.5).unwrap(),
             },
         ] {
             config.playout_cap = cap;

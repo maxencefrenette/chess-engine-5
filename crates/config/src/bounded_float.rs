@@ -1,39 +1,66 @@
+use std::marker::PhantomData;
+
 use serde::{Deserialize, Deserializer, Serialize, de::Error};
 
-/// A finite `f32` with inclusive integer bounds, serialized as an ordinary number.
+pub trait Endpoint: Copy {
+    const INCLUDED: bool;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub struct Inclusive;
+impl Endpoint for Inclusive {
+    const INCLUDED: bool = true;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub struct Exclusive;
+impl Endpoint for Exclusive {
+    const INCLUDED: bool = false;
+}
+
+/// A finite `f64` with integer bounds, serialized as an ordinary number.
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
-pub struct BoundedFloat<const MIN: i32, const MAX: i32>(f32);
+pub struct BoundedFloat<const MIN: i32, const MAX: i32, Lower: Endpoint, Upper: Endpoint>(
+    f64,
+    #[serde(skip)] PhantomData<(Lower, Upper)>,
+);
 
-pub type UnitInterval = BoundedFloat<0, 1>;
-
-impl<const MIN: i32, const MAX: i32> BoundedFloat<MIN, MAX> {
-    pub fn new(value: f32) -> Result<Self, String> {
-        Self::validate(f64::from(value))?;
-        Ok(Self(value))
-    }
-
-    pub const fn get(self) -> f32 {
-        self.0
-    }
-
-    fn validate(value: f64) -> Result<(), String> {
-        if value.is_finite() && (f64::from(MIN)..=f64::from(MAX)).contains(&value) {
-            Ok(())
+impl<const MIN: i32, const MAX: i32, Lower: Endpoint, Upper: Endpoint>
+    BoundedFloat<MIN, MAX, Lower, Upper>
+{
+    pub fn new(value: f64) -> Result<Self, String> {
+        let above = value > f64::from(MIN) || (Lower::INCLUDED && value == f64::from(MIN));
+        let below = value < f64::from(MAX) || (Upper::INCLUDED && value == f64::from(MAX));
+        if value.is_finite() && above && below {
+            Ok(Self(value, PhantomData))
         } else {
+            let left = if Lower::INCLUDED { '[' } else { '(' };
+            let right = if Upper::INCLUDED { ']' } else { ')' };
             Err(format!(
-                "expected a finite number in [{MIN}, {MAX}], got {value}"
+                "expected a finite number in {left}{MIN}, {MAX}{right}, got {value}"
             ))
         }
     }
+
+    pub const fn get(self) -> f64 {
+        self.0
+    }
 }
 
-impl<'de, const MIN: i32, const MAX: i32> Deserialize<'de> for BoundedFloat<MIN, MAX> {
+impl<const MIN: i32, const MAX: i32, Lower: Endpoint, Upper: Endpoint> std::fmt::Display
+    for BoundedFloat<MIN, MAX, Lower, Upper>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<'de, const MIN: i32, const MAX: i32, Lower: Endpoint, Upper: Endpoint> Deserialize<'de>
+    for BoundedFloat<MIN, MAX, Lower, Upper>
+{
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = f64::deserialize(deserializer)?;
-        // Validate before narrowing so out-of-range values cannot round into range.
-        Self::validate(value).map_err(D::Error::custom)?;
-        Self::new(value as f32).map_err(D::Error::custom)
+        Self::new(f64::deserialize(deserializer)?).map_err(D::Error::custom)
     }
 }
 
@@ -43,14 +70,14 @@ mod tests {
 
     #[derive(Debug, Deserialize, Serialize)]
     struct Settings {
-        value: UnitInterval,
+        value: BoundedFloat<0, 1, Inclusive, Inclusive>,
     }
 
     #[test]
     fn toml_accepts_endpoints_and_round_trips_as_a_number() {
         for value in ["0", "0.0", "0.25", "1", "1.0"] {
             let settings: Settings = toml::from_str(&format!("value = {value}")).unwrap();
-            assert_eq!(settings.value.get(), value.parse::<f32>().unwrap());
+            assert_eq!(settings.value.get(), value.parse::<f64>().unwrap());
             let text = toml::to_string(&settings).unwrap();
             let restored: Settings = toml::from_str(&text).unwrap();
             assert_eq!(restored.value, settings.value);
@@ -58,7 +85,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_values_before_float_rounding() {
+    fn rejects_nonfinite_and_out_of_range_values() {
         for value in [
             "-0.1",
             "1.1",
@@ -71,15 +98,47 @@ mod tests {
             let error = toml::from_str::<Settings>(&format!("value = {value}")).unwrap_err();
             assert!(error.to_string().contains("finite number in [0, 1]"));
         }
-        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.1, 1.1] {
-            assert!(UnitInterval::new(value).is_err());
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.1, 1.1] {
+            assert!(BoundedFloat::<0, 1, Inclusive, Inclusive>::new(value).is_err());
         }
     }
 
     #[test]
     fn supports_other_bounds_and_rejects_reversed_bounds() {
-        assert_eq!(BoundedFloat::<-2, 3>::new(-1.5).unwrap().get(), -1.5);
-        assert!(BoundedFloat::<-2, 3>::new(3.1).is_err());
-        assert!(BoundedFloat::<2, 1>::new(1.5).is_err());
+        assert_eq!(
+            BoundedFloat::<-2, 3, Inclusive, Inclusive>::new(-1.5)
+                .unwrap()
+                .get(),
+            -1.5
+        );
+        assert!(BoundedFloat::<-2, 3, Inclusive, Inclusive>::new(3.1).is_err());
+        assert!(BoundedFloat::<2, 1, Inclusive, Inclusive>::new(1.5).is_err());
+    }
+    #[test]
+    fn endpoint_markers_control_each_boundary() {
+        assert!(BoundedFloat::<0, 1, Exclusive, Inclusive>::new(0.).is_err());
+        assert!(BoundedFloat::<0, 1, Exclusive, Inclusive>::new(1.).is_ok());
+        assert!(BoundedFloat::<0, 1, Inclusive, Exclusive>::new(0.).is_ok());
+        assert!(BoundedFloat::<0, 1, Inclusive, Exclusive>::new(1.).is_err());
+        assert!(BoundedFloat::<1, 1, Inclusive, Inclusive>::new(1.).is_ok());
+        assert!(BoundedFloat::<1, 1, Exclusive, Inclusive>::new(1.).is_err());
+        assert!(BoundedFloat::<1, 1, Inclusive, Exclusive>::new(1.).is_err());
+    }
+
+    #[test]
+    fn exclusive_intervals_deserialize_and_serialize_as_numbers() {
+        #[derive(Debug, Deserialize, Serialize)]
+        struct Settings {
+            value: BoundedFloat<0, 1, Exclusive, Exclusive>,
+        }
+        for raw in ["0", "1", "nan", "inf", "-inf"] {
+            assert!(toml::from_str::<Settings>(&format!("value = {raw}")).is_err());
+        }
+        let settings: Settings = toml::from_str("value = 0.123456789012345").unwrap();
+        assert_eq!(settings.value.get(), 0.123456789012345);
+        let serialized = toml::to_string(&settings).unwrap();
+        let restored: Settings = toml::from_str(&serialized).unwrap();
+        assert_eq!(settings.value, restored.value);
+        assert_eq!(settings.value.to_string(), "0.123456789012345");
     }
 }

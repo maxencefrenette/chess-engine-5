@@ -19,11 +19,11 @@ impl RescoringConfig {
             },
             policy_mix: match self {
                 Self::Disabled => 0.,
-                Self::Chesstb { policy_mix, .. } => policy_mix.get(),
+                Self::Chesstb { policy_mix, .. } => policy_mix.get() as f32,
             },
             value_mix: match self {
                 Self::Disabled => 0.,
-                Self::Chesstb { value_mix, .. } => value_mix.get(),
+                Self::Chesstb { value_mix, .. } => value_mix.get() as f32,
             },
             stats: Stats::default(),
         })

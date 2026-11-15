@@ -28,8 +28,20 @@ fn row(pieces: &[(usize, u8)], black: bool) -> Row {
 fn tables() -> io::Result<Rescorer> {
     RescoringConfig::Chesstb {
         directory: PathBuf::from("/data/chess/tablebases/chesstb-5"),
-        policy_mix: chess_config::UnitInterval::new(0.).unwrap(),
-        value_mix: chess_config::UnitInterval::new(1.).unwrap(),
+        policy_mix: chess_config::BoundedFloat::<
+            0,
+            1,
+            chess_config::Inclusive,
+            chess_config::Inclusive,
+        >::new(0.)
+        .unwrap(),
+        value_mix: chess_config::BoundedFloat::<
+            0,
+            1,
+            chess_config::Inclusive,
+            chess_config::Inclusive,
+        >::new(1.)
+        .unwrap(),
     }
     .open()
 }
@@ -159,8 +171,20 @@ fn repetition_guard_uses_full_game_before_subsampling() {
 fn dtz_boost_prefers_mate_and_does_not_boost_losses() -> io::Result<()> {
     let mut rescorer = RescoringConfig::Chesstb {
         directory: "/data/chess/tablebases/chesstb-5".into(),
-        policy_mix: chess_config::UnitInterval::new(0.5).unwrap(),
-        value_mix: chess_config::UnitInterval::new(1.).unwrap(),
+        policy_mix: chess_config::BoundedFloat::<
+            0,
+            1,
+            chess_config::Inclusive,
+            chess_config::Inclusive,
+        >::new(0.5)
+        .unwrap(),
+        value_mix: chess_config::BoundedFloat::<
+            0,
+            1,
+            chess_config::Inclusive,
+            chess_config::Inclusive,
+        >::new(1.)
+        .unwrap(),
     }
     .open()?;
     let mut winning = row(&[(45, 6), (46, 5), (63, 12)], false);
@@ -210,8 +234,20 @@ fn value_mixture_preserves_endpoints_and_probability_mass() {
 fn soft_rescoring_respects_repetition_guard() -> io::Result<()> {
     let mut rescorer = RescoringConfig::Chesstb {
         directory: "/data/chess/tablebases/chesstb-5".into(),
-        policy_mix: chess_config::UnitInterval::new(0.).unwrap(),
-        value_mix: chess_config::UnitInterval::new(0.25).unwrap(),
+        policy_mix: chess_config::BoundedFloat::<
+            0,
+            1,
+            chess_config::Inclusive,
+            chess_config::Inclusive,
+        >::new(0.)
+        .unwrap(),
+        value_mix: chess_config::BoundedFloat::<
+            0,
+            1,
+            chess_config::Inclusive,
+            chess_config::Inclusive,
+        >::new(0.25)
+        .unwrap(),
     }
     .open()?;
     let mut winning = row(&[(0, 6), (9, 5), (47, 12)], false);

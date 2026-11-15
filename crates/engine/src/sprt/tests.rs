@@ -10,8 +10,8 @@ fn check_fishtest_reference(
     let config = Config {
         lower_nelo: bounds[0],
         upper_nelo: bounds[1],
-        alpha: errors[0],
-        beta: errors[1],
+        alpha: chess_config::BoundedFloat::new(errors[0]).unwrap(),
+        beta: chess_config::BoundedFloat::new(errors[1]).unwrap(),
     };
     let llr = config.llr(counts).unwrap();
     assert!(
@@ -93,8 +93,8 @@ fn validates_config_and_handles_no_results() {
     let mut config = Config {
         lower_nelo: 0.,
         upper_nelo: 20.,
-        alpha: 0.05,
-        beta: 0.05,
+        alpha: chess_config::BoundedFloat::new(0.05).unwrap(),
+        beta: chess_config::BoundedFloat::new(0.05).unwrap(),
     };
     assert!(config.validate());
     assert_eq!(config.llr([0; 5]).unwrap(), 0.0);
@@ -105,7 +105,7 @@ fn validates_config_and_handles_no_results() {
     config.upper_nelo = f64::NAN;
     assert!(!config.validate());
     config.upper_nelo = 20.;
-    config.alpha = 0.;
+    config.alpha = chess_config::BoundedFloat::new(0.95).unwrap();
     assert!(!config.validate());
 }
 

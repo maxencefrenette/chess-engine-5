@@ -8,7 +8,7 @@ use rand_chacha::ChaCha8Rng;
 use serde_json::json;
 
 use crate::{
-    config::{Config, OptimizerConfig, Schedule},
+    config::{Config, OptimizerConfig},
     data::{self, Batch, Result},
 };
 
@@ -65,22 +65,11 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     if curriculum.is_empty() {
         return Err("curriculum must contain at least one phase".into());
     }
-    if !(value_sample_rate > 0.0 && value_sample_rate <= 1.0) {
-        return Err("value_sample_rate must be in (0, 1]".into());
-    }
     if !value_loss_weight.is_finite() || value_loss_weight <= 0.0 {
         return Err("value_loss_weight must be positive and finite".into());
     }
     if !adamw.learning_rate.is_finite() || adamw.learning_rate <= 0. {
         return Err("training optimizer.learning_rate must be positive and finite".into());
-    }
-    if let Schedule::Cosine {
-        warmup_fraction,
-        min_ratio,
-    } = adamw.schedule
-        && (!(0.0..1.0).contains(&warmup_fraction) || !(0.0..=1.0).contains(&min_ratio))
-    {
-        return Err("cosine warmup_fraction must be in [0, 1) and min_ratio in [0, 1]".into());
     }
     if output_dir.exists() {
         return Err(format!("output already exists: {}", output_dir.display()).into());
@@ -96,7 +85,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
                 &step.dataset,
                 seed,
                 step.num_positions.get(),
-                value_sample_rate,
+                value_sample_rate.get(),
                 index + 1 == curriculum.len(),
                 &mut rescorer,
             )
@@ -157,8 +146,8 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         parameters.all_vars(),
         ParamsAdamW {
             lr: adamw.learning_rate,
-            beta1: adamw.beta1,
-            beta2: adamw.beta2,
+            beta1: adamw.beta1.get(),
+            beta2: adamw.beta2.get(),
             eps: adamw.eps,
             weight_decay: adamw.weight_decay,
         },
