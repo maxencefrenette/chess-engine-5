@@ -1,4 +1,4 @@
-baseline_dir = "/data/chess/chess-engine-5/models/data-crank-2026.11.14/round-01/candidate"
+baseline_dir = "/data/chess/chess-engine-5/models/material-hint-tuning-2026.11.15/cosine-002-no-hints"
 opening_book = "UHO_Lichess_4560_v1.epd"
 device = "cuda"
 batch = 128

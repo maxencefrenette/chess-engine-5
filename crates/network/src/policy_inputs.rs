@@ -4,6 +4,7 @@ use crate::{INPUTS, Net, SQUARES, move_indices};
 
 pub struct PolicyInputs {
     positions: Tensor,
+    hints: Option<Tensor>,
     moves: Tensor,
     promotions: Tensor,
     promotes: Tensor,
@@ -28,6 +29,7 @@ impl PolicyInputs {
         }
         let shape = (size, width);
         Ok(Self {
+            hints: None,
             positions: Tensor::from_vec(positions, (size, SQUARES, INPUTS), device)?,
             moves: Tensor::from_vec(indices, shape, device)?,
             promotions: Tensor::from_vec(promotions, shape, device)?,
@@ -35,16 +37,30 @@ impl PolicyInputs {
         })
     }
 
+    pub fn with_hints(mut self, hints: Vec<[f32; crate::hints::FEATURES]>) -> Result<Self> {
+        let size = self.positions.dim(0)?;
+        if hints.len() != size {
+            candle_core::bail!("hint batch size mismatch");
+        }
+        self.hints = Some(Tensor::from_vec(
+            hints.into_iter().flatten().collect::<Vec<_>>(),
+            (size, crate::hints::FEATURES),
+            self.positions.device(),
+        )?);
+        Ok(self)
+    }
+
     pub fn move_width(&self) -> usize {
         self.moves.dims()[1]
     }
 
     pub fn logits(&self, net: &Net) -> Result<(Tensor, Tensor)> {
-        net.forward(
+        net.forward_hinted(
             &self.positions,
             &self.moves,
             &self.promotions,
             &self.promotes,
+            self.hints.as_ref(),
         )
     }
 }

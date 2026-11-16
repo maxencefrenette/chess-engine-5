@@ -4,7 +4,10 @@ use candle_core::{Device, Tensor, safetensors};
 use candle_nn::VarBuilder;
 use serde::{Deserialize, Serialize};
 
-use crate::{ModelConfig, Net};
+use crate::{
+    ModelConfig, Net,
+    hints::{HintConfig, MaterialTable},
+};
 
 const CONFIG_FILE: &str = "config.toml";
 const METRICS_FILE: &str = "metrics.toml";
@@ -23,6 +26,7 @@ struct ModelSettings {
 pub struct Checkpoint {
     tensors: HashMap<String, Tensor>,
     model: ModelConfig,
+    pub hints: MaterialTable,
 }
 
 impl Checkpoint {
@@ -33,9 +37,16 @@ impl Checkpoint {
         })?;
         let config: Config<ModelSettings> = toml::from_str(&text)
             .map_err(|error| io::Error::other(format!("{}: {error}", path.display())))?;
-        let tensors =
+        let mut tensors =
             safetensors::load(directory.join(WEIGHTS_FILE), device).map_err(io::Error::other)?;
+        let hints = match config.training.model.hints {
+            HintConfig::Disabled {} => MaterialTable::default(),
+            HintConfig::Material { .. } => {
+                MaterialTable::load(&mut tensors).map_err(io::Error::other)?
+            }
+        };
         Ok(Self {
+            hints,
             tensors,
             model: config.training.model,
         })

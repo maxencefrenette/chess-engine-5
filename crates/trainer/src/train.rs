@@ -71,7 +71,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     let setup_started = Instant::now();
     data::check_disjoint(curriculum.iter().map(|step| step.dataset.as_path()))?;
     let mut rescorer = config.value_rescoring.open()?;
-    let datasets = curriculum
+    let mut datasets = curriculum
         .iter()
         .enumerate()
         .map(|(index, step)| {
@@ -90,6 +90,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         "tablebase rescoring: {} value labels probed, {} changed",
         rescorer.stats.probed, rescorer.stats.changed
     );
+    let hints = data::attach_hints(&mut datasets, model.hints);
     let phase_steps = curriculum
         .iter()
         .zip(&datasets)
@@ -138,6 +139,8 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     )?;
     let mut optimizer = AdamW::new(parameters.all_vars(), adamw.into())?;
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut hint_rng = ChaCha8Rng::seed_from_u64(seed);
+    hint_rng.set_stream(1);
     let mut history = Vec::with_capacity(planned_steps.div_ceil(METRICS_INTERVAL));
     device.synchronize()?;
     let training_started = Instant::now();
@@ -165,7 +168,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
             let mut epoch_positions = 0;
             let mut epoch_values = 0;
             for chunk in indices.chunks(batch_size).take(end_step - optimizer_steps) {
-                let batch = Batch::new(rows, chunk, device)?;
+                let batch = Batch::new(rows, chunk, device, model.hints.dropout(), &mut hint_rng)?;
                 let [policy, value] = losses(&net, &batch)?;
                 let objective = (&policy + (&value * value_loss_weight)?)?;
                 let lr =
@@ -240,7 +243,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         .as_secs_f64();
 
     // Load the trained parameters as constants so the test pass does not build a backward graph.
-    let tensors: std::collections::HashMap<_, _> = parameters
+    let mut tensors: std::collections::HashMap<_, _> = parameters
         .data()
         .lock()
         .unwrap()
@@ -260,7 +263,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     let mut value_baseline = 0.;
     let indices: Vec<_> = (0..held_out.test.len()).collect();
     for chunk in indices.chunks(batch_size) {
-        let batch = Batch::new(&held_out.test, chunk, device)?;
+        let batch = Batch::new(&held_out.test, chunk, device, 0., &mut hint_rng)?;
         for (total, loss) in totals.iter_mut().zip(losses(&net, &batch)?) {
             *total += f64::from(loss.to_scalar::<f32>()?) * chunk.len() as f64;
         }
@@ -315,6 +318,12 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     });
     if let Some(generation) = generation_seconds {
         metrics["estimated_generation_seconds"] = json!(generation);
+    }
+    if matches!(
+        model.hints,
+        chess_network::hints::HintConfig::Material { .. }
+    ) {
+        hints.save(&mut tensors)?;
     }
     checkpoint::save(output_dir, tensors, &config, metrics)?;
     let mut csv =
@@ -401,7 +410,8 @@ mod tests {
         let board = Tensor::randn(0f32, 1., (1, SQUARES, INPUTS), device)?;
         let moves = Tensor::zeros((1, 1), DType::U32, device)?;
         let promotes = Tensor::zeros((1, 1), DType::F32, device)?;
-        let (policy, _) = net.forward(&board, &moves, &moves, &promotes)?;
+        let hints = Tensor::zeros((1, chess_network::hints::FEATURES), DType::F32, device)?;
+        let (policy, _) = net.forward_hinted(&board, &moves, &moves, &promotes, Some(&hints))?;
         let grads = policy.sum_all()?.backward()?;
         let params = params.data().lock().unwrap();
         for name in [
@@ -430,9 +440,10 @@ mod tests {
         let boards = Tensor::randn(0f32, 1., (2, SQUARES, INPUTS), device)?;
         let moves = Tensor::zeros((2, 1), DType::U32, device)?;
         let promotes = Tensor::zeros((2, 1), DType::F32, device)?;
+        let hints = Tensor::zeros((2, chess_network::hints::FEATURES), DType::F32, device)?;
         let labels = Tensor::new(&[0_u32, 2], device)?;
         let objective = || -> candle_core::Result<Tensor> {
-            let (_, wdl) = net.forward(&boards, &moves, &moves, &promotes)?;
+            let (_, wdl) = net.forward_hinted(&boards, &moves, &moves, &promotes, Some(&hints))?;
             candle_nn::loss::cross_entropy(&wdl, &labels)
         };
         // Zero output initialization needs one update before trunk gradients flow.

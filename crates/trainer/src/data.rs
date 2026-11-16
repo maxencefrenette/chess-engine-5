@@ -7,12 +7,17 @@ use std::{
 use candle_core::{Device, Tensor};
 pub use chess_data::Result;
 use chess_data::{discover_shards, read_shard};
-use rand::{SeedableRng, seq::SliceRandom};
+use rand::{Rng, SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha8Rng;
 
 use chess_network::{INPUTS, SQUARES, encode_position, policy_inputs::PolicyInputs};
 
 pub struct Row {
+    game: u64,
+    black: bool,
+    material: chess_network::hints::MaterialKey,
+    outcome: i8,
+    hint: [f32; chess_network::hints::FEATURES],
     features: Vec<f32>,
     moves: Vec<(u16, f32)>,
     total_visits: f32,
@@ -109,6 +114,7 @@ pub fn load(
             .into_iter()
             .zip(mask)
             .map(|(mut row, use_value)| {
+                let outcome = row.value;
                 let value = if use_value {
                     let repeated = history.has_repeated(&row);
                     rescorer.value(&mut row, repeated)?
@@ -117,6 +123,7 @@ pub fn load(
                 };
                 let policy = rescorer.policy(&row)?;
                 let mut encoded = encode_row(row, use_value)?;
+                encoded.outcome = outcome;
                 encoded.total_visits = policy.iter().map(|(_, p)| p).sum();
                 encoded.moves = policy;
                 encoded.value = value;
@@ -151,6 +158,11 @@ fn encode_row(row: chess_data::Row, use_value: bool) -> Result<Row> {
     )
     .ok_or("invalid piece code")?;
     Ok(Row {
+        game: row.game_id,
+        black: black_to_move,
+        material: chess_network::hints::material_key(board, black_to_move),
+        outcome: row.value,
+        hint: [0.; chess_network::hints::FEATURES],
         features,
         total_visits: row
             .position
@@ -169,6 +181,29 @@ fn encode_row(row: chess_data::Row, use_value: bool) -> Result<Row> {
     })
 }
 
+pub fn attach_hints(
+    datasets: &mut [Dataset],
+    config: chess_network::hints::HintConfig,
+) -> chess_network::hints::MaterialTable {
+    use chess_network::hints::{HintConfig, MaterialTable, TableBuilder};
+    if matches!(config, HintConfig::Disabled {}) {
+        return MaterialTable::default();
+    }
+    let mut builder = TableBuilder::default();
+    for (phase, data) in datasets.iter().enumerate() {
+        for row in &data.train {
+            builder.observe(phase, row.game, row.material, row.black, row.outcome);
+        }
+    }
+    let table = builder.finish();
+    for data in datasets {
+        for row in data.train.iter_mut().chain(&mut data.test) {
+            row.hint = table.lookup(&row.material, config);
+        }
+    }
+    table
+}
+
 pub struct Batch {
     pub inputs: PolicyInputs,
     pub mask: Tensor,
@@ -180,7 +215,13 @@ pub struct Batch {
 }
 
 impl Batch {
-    pub fn new(rows: &[Row], indices: &[usize], device: &Device) -> candle_core::Result<Self> {
+    pub fn new(
+        rows: &[Row],
+        indices: &[usize],
+        device: &Device,
+        hint_dropout: f64,
+        rng: &mut impl Rng,
+    ) -> candle_core::Result<Self> {
         let size = indices.len();
         let mut positions = Vec::with_capacity(size * SQUARES * INPUTS);
         for &i in indices {
@@ -189,7 +230,18 @@ impl Batch {
         let moves = indices
             .iter()
             .map(|&i| rows[i].moves.iter().map(|&(mv, _)| mv));
-        let inputs = PolicyInputs::new(positions, moves, device)?;
+        let inputs = PolicyInputs::new(positions, moves, device)?.with_hints(
+            indices
+                .iter()
+                .map(|&i| {
+                    if hint_dropout > 0. && rng.random_bool(hint_dropout) {
+                        [0.; chess_network::hints::FEATURES]
+                    } else {
+                        rows[i].hint
+                    }
+                })
+                .collect(),
+        )?;
         let width = inputs.move_width();
         let mut mask = vec![-1e9_f32; size * width];
         let mut policy = vec![0f32; size * width];
@@ -232,6 +284,48 @@ impl Batch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hints_use_selected_training_games_only() {
+        use chess_network::hints::HintConfig;
+        let row = |game, material, outcome| Row {
+            game,
+            material,
+            outcome,
+            black: false,
+            hint: [0.; chess_network::hints::FEATURES],
+            features: Vec::new(),
+            moves: Vec::new(),
+            total_visits: 0.,
+            value: crate::rescoring::game_value(outcome),
+            use_value: false,
+        };
+        let mut datasets = [Dataset {
+            train: (0..20).map(|game| row(game, [1; 10], 1)).collect(),
+            test: (0..100)
+                .map(|game| row(game, [2; 10], -1))
+                .chain(std::iter::once(row(100, [1; 10], -1)))
+                .collect(),
+            train_games: 20,
+            value_labels_per_game: Vec::new(),
+            test_ids: Vec::new(),
+            estimated_generation_seconds: None,
+        }];
+        let config = HintConfig::Material {
+            min_games: 20.try_into().unwrap(),
+            injection: chess_network::hints::Injection::Early,
+            dropout: 0.,
+        };
+        let table = attach_hints(&mut datasets, config);
+        assert_eq!(
+            table.lookup(&[2; 10], config),
+            [0.; chess_network::hints::FEATURES]
+        );
+        let expected = table.lookup(&[1; 10], config);
+        assert_eq!(expected[..3], [1. / 23., 1. / 23., 21. / 23.]);
+        assert_eq!(datasets[0].test.last().unwrap().hint, expected);
+        assert_eq!(datasets[0].train[0].hint, expected);
+    }
 
     #[test]
     #[ignore = "requires downloaded ChessTB tables on the HDD"]

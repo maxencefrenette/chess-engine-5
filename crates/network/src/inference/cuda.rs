@@ -24,7 +24,7 @@ pub(super) struct Inference {
 
 struct Entry {
     graph: CudaGraph,
-    inputs: [Tensor; 4],
+    inputs: [Tensor; 5],
     outputs: (Tensor, Tensor),
     shape: (usize, usize),
 }
@@ -33,6 +33,7 @@ impl Inference {
     pub(super) fn evaluate(
         &mut self,
         net: &Net,
+        table: &crate::hints::MaterialTable,
         positions: impl ExactSizeIterator<Item = (chess_data::Board, bool)>,
         moves: impl ExactSizeIterator<Item = impl ExactSizeIterator<Item = u16>> + Clone,
         device: &Device,
@@ -46,7 +47,12 @@ impl Inference {
             .max(1)
             .next_power_of_two();
         let mut boards = vec![0u8; batch * PACKED];
+        let mut hints = Vec::with_capacity(batch * crate::hints::FEATURES);
         for (i, (board, black)) in positions.enumerate() {
+            hints.extend_from_slice(&table.lookup(
+                &crate::hints::material_key(&board.board, black),
+                net.config.hints,
+            ));
             if board.board.iter().any(|&b| (b & 15) > 12 || (b >> 4) > 12) {
                 candle_core::bail!("invalid piece code")
             }
@@ -80,6 +86,7 @@ impl Inference {
                 Tensor::from_vec(indices, (batch, width), device)?,
                 Tensor::from_vec(promotions, (batch, width), device)?,
                 Tensor::from_vec(promotes, (batch, width), device)?,
+                Tensor::from_vec(hints, (batch, crate::hints::FEATURES), device)?,
             ];
             let (policy, value) = forward(net, &inputs)?;
             return Ok((policy.to_vec2()?, value.to_vec2()?));
@@ -101,6 +108,7 @@ impl Inference {
         entry.inputs[1].inplace_op1(&Upload(&indices))?;
         entry.inputs[2].inplace_op1(&Upload(&promotions))?;
         entry.inputs[3].inplace_op1(&Upload(&promotes))?;
+        entry.inputs[4].inplace_op1(&Upload(&hints))?;
         entry.graph.launch().map_err(cuda_error)?;
         Ok((entry.outputs.0.to_vec2()?, entry.outputs.1.to_vec2()?))
     }
@@ -114,6 +122,7 @@ impl Entry {
             Tensor::zeros((batch, width), DType::U32, device)?,
             Tensor::zeros((batch, width), DType::U32, device)?,
             Tensor::zeros((batch, width), DType::F32, device)?,
+            Tensor::zeros((batch, crate::hints::FEATURES), DType::F32, device)?,
         ];
         let cuda = device.as_cuda_device()?;
         let _cache = cuda.enable_cuda_graph_htod_cache();
@@ -143,9 +152,15 @@ impl Entry {
     }
 }
 
-fn forward(net: &Net, inputs: &[Tensor; 4]) -> Result<(Tensor, Tensor)> {
+fn forward(net: &Net, inputs: &[Tensor; 5]) -> Result<(Tensor, Tensor)> {
     let positions = inputs[0].apply_op1_no_bwd(&Encode)?;
-    let (policy, value) = net.forward(&positions, &inputs[1], &inputs[2], &inputs[3])?;
+    let (policy, value) = net.forward_hinted(
+        &positions,
+        &inputs[1],
+        &inputs[2],
+        &inputs[3],
+        Some(&inputs[4]),
+    )?;
     Ok((policy.to_dtype(DType::F32)?, value.to_dtype(DType::F32)?))
 }
 
