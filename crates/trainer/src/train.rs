@@ -138,6 +138,8 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         model,
     )?;
     let mut optimizer = AdamW::new(parameters.all_vars(), adamw.into())?;
+    let mut average =
+        crate::weight_averaging::TailAverage::new(&config.weight_averaging, planned_steps);
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut hint_rng = ChaCha8Rng::seed_from_u64(seed);
     hint_rng.set_stream(1);
@@ -176,6 +178,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
                 optimizer.set_learning_rate(lr);
                 optimizer.backward_step(&objective)?;
                 optimizer_steps += 1;
+                average.update(&parameters, optimizer_steps)?;
                 epoch_positions += chunk.len();
                 positions_seen += chunk.len();
                 window_positions += chunk.len();
@@ -250,6 +253,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         .iter()
         .map(|(name, var)| (name.clone(), var.as_tensor().detach()))
         .collect();
+    tensors = average.finish(tensors);
     let builder = VarBuilder::from_tensors(tensors.clone(), DType::F32, device);
     let net = Net::new(builder, model)?;
     let mut counts = [1.; 3];

@@ -1,6 +1,7 @@
 output_dir = "/data/chess/chess-engine-5/models/smolgen-experiment"
 device = "cuda"
 batch_size = 128
+weight_averaging = { mode = "disabled" }
 seed = 42
 value_sample_rate = 0.125
 value_loss_weight = 0.03
