@@ -91,12 +91,21 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         rescorer.stats.probed, rescorer.stats.changed
     );
     let hints = data::attach_hints(&mut datasets, model.hints);
+    let both = matches!(config.reflection, crate::config::Reflection::Both {});
+    let random_rate = match config.reflection {
+        crate::config::Reflection::Random { rate } => rate,
+        _ => 0.,
+    };
+    let phase_examples: Vec<_> = datasets
+        .iter()
+        .map(|data| data::examples(&data.train, both))
+        .collect();
     let phase_steps = curriculum
         .iter()
-        .zip(&datasets)
+        .zip(&phase_examples)
         .enumerate()
         .map(|(index, (step, data))| {
-            step.optimizer_steps(data.train.len(), batch_size)
+            step.optimizer_steps(data.len(), batch_size)
                 .map_err(|error| format!("curriculum phase {}: {error}", index + 1).into())
         })
         .collect::<Result<Vec<_>>>()?;
@@ -158,7 +167,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     let mut partial_epoch_positions = 0;
     for (index, (data, phase_steps)) in datasets.iter().zip(phase_steps).enumerate() {
         let rows = &data.train;
-        let mut indices: Vec<_> = (0..rows.len()).collect();
+        let mut indices = phase_examples[index].clone();
         let steps_per_epoch = indices.len().div_ceil(batch_size);
         let end_step = optimizer_steps + phase_steps;
         let phase_start = positions_seen;
@@ -170,7 +179,14 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
             let mut epoch_positions = 0;
             let mut epoch_values = 0;
             for chunk in indices.chunks(batch_size).take(end_step - optimizer_steps) {
-                let batch = Batch::new(rows, chunk, device, model.hints.dropout(), &mut hint_rng)?;
+                let batch = Batch::new(
+                    rows,
+                    chunk,
+                    device,
+                    random_rate,
+                    model.hints.dropout(),
+                    &mut hint_rng,
+                )?;
                 let [policy, value] = losses(&net, &batch)?;
                 let objective = (&policy + (&value * value_loss_weight)?)?;
                 let lr =
@@ -224,7 +240,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
             }
             println!(
                 "epoch {epoch}: {epoch_positions}/{} positions; train policy {policy:.4}, WDL {value:.4}, {:.1}s",
-                rows.len(),
+                indices.len(),
                 epoch_started.elapsed().as_secs_f64()
             );
         }
@@ -234,9 +250,10 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         phase_metrics.push(json!({
             "phase": index + 1,
             "positions": rows.len(),
+            "examples_per_epoch": indices.len(),
             "optimizer_steps": phase_steps,
             "positions_seen": positions_seen - phase_start,
-            "epochs": (positions_seen - phase_start) as f64 / rows.len() as f64,
+            "epochs": (positions_seen - phase_start) as f64 / indices.len() as f64,
         }));
     }
     device.synchronize()?;
@@ -265,18 +282,32 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     let count_sum = counts.iter().sum::<f64>();
     let mut totals = [0.; 3];
     let mut value_baseline = 0.;
-    let indices: Vec<_> = (0..held_out.test.len()).collect();
-    for chunk in indices.chunks(batch_size) {
-        let batch = Batch::new(&held_out.test, chunk, device, 0., &mut hint_rng)?;
+    let indices = data::examples(&held_out.test, false);
+    let (eligible, other): (Vec<_>, Vec<_>) = indices
+        .into_iter()
+        .partition(|&i| held_out.test[i.row].can_reflect);
+    let mut eligible_losses = [0.; 2];
+    for chunk in eligible.chunks(batch_size).chain(other.chunks(batch_size)) {
+        let batch = Batch::new(&held_out.test, chunk, device, 0., 0., &mut hint_rng)?;
         for (total, loss) in totals.iter_mut().zip(losses(&net, &batch)?) {
             *total += f64::from(loss.to_scalar::<f32>()?) * chunk.len() as f64;
         }
+        if held_out.test[chunk[0].row].can_reflect {
+            eligible_losses.copy_from_slice(&totals[..2]);
+        }
         totals[2] += batch.uniform_loss;
         for &row in chunk {
-            for (count, probability) in counts.iter().zip(held_out.test[row].value) {
+            for (count, probability) in counts.iter().zip(held_out.test[row.row].value) {
                 value_baseline -= f64::from(probability) * (count / count_sum).ln();
             }
         }
+    }
+    if !eligible.is_empty() {
+        let [policy, wdl] = eligible_losses.map(|loss| loss / eligible.len() as f64);
+        println!(
+            "held-out without castling rights: {} positions, policy {policy:.6}, WDL {wdl:.6}",
+            eligible.len()
+        );
     }
     let test_count = held_out.test.len() as f64;
     let [policy, value, uniform] = totals.map(|loss| loss / test_count);
@@ -293,7 +324,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
 
     println!(
         "epochs: {completed_epochs} complete, {partial_epoch_positions}/{} positions in a partial epoch",
-        held_out.train.len()
+        phase_examples.last().unwrap().len()
     );
 
     let mut metrics = json!({
