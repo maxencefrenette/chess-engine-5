@@ -60,9 +60,15 @@ Required evidence: `mise run eval-model -- non-regression "$candidate_dir"`
 
 ### Learning rule
 
-Changes how predictions and targets produce parameter updates, including target definitions, objectives, optimizers, learning-rate schedules, batch size.
+Changes how predictions and targets produce parameter updates, including optimizers, learning-rate schedules, batch size, adding auxiliary heads.
 
 Intermediate evidence: Held-out loss is a useful metric to determine if a candidate deserves a full SPRT test.
+Required evidence: `mise run eval-model -- gainer --matched-speed "$candidate_dir"`
+
+### Training objective
+
+Changes what the deployed policy or value head is trained to predict, or how training weights errors on those outputs. Examples include sharpening visit targets and changing the relative weights of policy and value loss. Multiple candidates may be run in a match against the baseline.
+
 Required evidence: `mise run eval-model -- gainer --matched-speed "$candidate_dir"`
 
 ### Inference approximation

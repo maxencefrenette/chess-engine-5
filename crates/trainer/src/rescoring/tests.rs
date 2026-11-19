@@ -19,6 +19,7 @@ fn row(pieces: &[(usize, u8)], black: bool) -> Row {
                 repetitions: 1,
             },
             policy: vec![(123, 800)],
+            root_q: Some(0.),
             played_move: 123,
         },
         value: 0,

@@ -203,6 +203,11 @@ impl Search {
         best.mv
     }
 
+    pub fn root_value(&self) -> f32 {
+        let root = &self.tree.nodes[0];
+        root.value_sum / root.visits as f32
+    }
+
     pub fn visits(&self) -> impl DoubleEndedIterator<Item = MoveVisits> + '_ {
         let NodeState::Branch(children) = &self.tree.nodes[0].state else {
             unreachable!("root must be expanded");
@@ -262,7 +267,7 @@ mod tests {
         assert!(search.next_leaf(&game, budget, 1.4).is_none());
         assert_eq!(search.visits().filter(|entry| entry.visits == 1).count(), 2);
         assert!(search.tree.nodes.iter().all(|node| node.pending == 0));
-        assert_eq!(search.tree.nodes[0].value_sum, -0.5);
+        assert_eq!(search.root_value(), -0.25);
     }
 
     #[test]

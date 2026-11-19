@@ -54,6 +54,16 @@ impl PolicyInputs {
         self.moves.dims()[1]
     }
 
+    pub fn logits_with_features(&self, net: &Net) -> Result<(Tensor, Tensor, Tensor)> {
+        net.forward_with_features(
+            &self.positions,
+            &self.moves,
+            &self.promotions,
+            &self.promotes,
+            self.hints.as_ref(),
+        )
+    }
+
     pub fn logits(&self, net: &Net) -> Result<(Tensor, Tensor)> {
         net.forward_hinted(
             &self.positions,

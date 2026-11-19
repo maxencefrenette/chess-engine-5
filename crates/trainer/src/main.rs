@@ -4,6 +4,7 @@ use chess_config::TomlConfig;
 
 mod config;
 mod data;
+mod reply;
 mod rescoring;
 mod train;
 mod weight_averaging;

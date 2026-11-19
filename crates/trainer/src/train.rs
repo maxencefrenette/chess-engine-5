@@ -32,20 +32,30 @@ fn soft_value_loss(logits: &Tensor, targets: &Tensor) -> candle_core::Result<Ten
         .mean_all()
 }
 
-fn losses(net: &Net, batch: &Batch) -> candle_core::Result<[Tensor; 2]> {
-    let (policy, wdl) = batch.inputs.logits(net)?;
+fn losses(
+    logits: (Tensor, Tensor),
+    batch: &Batch,
+) -> candle_core::Result<([Tensor; 2], Option<Tensor>)> {
+    let (policy, wdl) = logits;
     let log_probs = log_softmax(&(&policy + &batch.mask)?, 1)?;
     let policy = (&log_probs * &batch.policy)?.sum(1)?.neg()?.mean_all()?;
+    let mut root_error = None;
     let value = if let Some(targets) = &batch.value {
         let wdl = match &batch.value_indices {
             Some(indices) => wdl.index_select(indices, 0)?,
             None => wdl,
         };
-        soft_value_loss(&wdl, targets)?
+        let loss = soft_value_loss(&wdl, targets)?;
+        if let Some(q) = &batch.root_q {
+            let probs = candle_nn::ops::softmax(&wdl, 1)?;
+            let ev = (probs.narrow(1, 2, 1)? - probs.narrow(1, 0, 1)?)?.squeeze(1)?;
+            root_error = Some((ev - q)?.sqr()?.mean_all()?);
+        }
+        loss
     } else {
         Tensor::zeros((), policy.dtype(), policy.device())?
     };
-    Ok([policy, value])
+    Ok(([policy, value], root_error))
 }
 
 pub fn run(config: Config, device: &Device) -> Result<()> {
@@ -54,7 +64,6 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         batch_size,
         ref optimizer,
         seed,
-        value_sample_rate,
         value_loss_weight,
         ref curriculum,
         model,
@@ -77,9 +86,8 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         .map(|(index, step)| {
             data::load(
                 &step.dataset,
-                seed,
+                &config,
                 step.num_positions.get(),
-                value_sample_rate,
                 index + 1 == curriculum.len(),
                 &mut rescorer,
             )
@@ -146,6 +154,14 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         VarBuilder::from_varmap(&parameters, DType::F32, device),
         model,
     )?;
+    let reply_head = (config.reply_weight > 0.)
+        .then(|| {
+            crate::reply::Head::new(
+                VarBuilder::from_varmap(&parameters, DType::F32, device).pp("reply"),
+                model.width,
+            )
+        })
+        .transpose()?;
     let mut optimizer = AdamW::new(parameters.all_vars(), adamw.into())?;
     let mut average =
         crate::weight_averaging::TailAverage::new(&config.weight_averaging, planned_steps);
@@ -187,8 +203,17 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
                     model.hints.dropout(),
                     &mut hint_rng,
                 )?;
-                let [policy, value] = losses(&net, &batch)?;
-                let objective = (&policy + (&value * value_loss_weight)?)?;
+                let (policy, wdl, encoded) = batch.inputs.logits_with_features(&net)?;
+                let ([policy, value], root_error) = losses((policy, wdl), &batch)?;
+                let value_objective = match root_error {
+                    Some(error) => (&value + (error * config.root_q_weight)?)?,
+                    None => value.clone(),
+                };
+                let mut objective = (&policy + (value_objective * value_loss_weight)?)?;
+                if let (Some(head), Some(target)) = (&reply_head, &batch.reply) {
+                    objective =
+                        (objective + (head.loss(&encoded, target)? * config.reply_weight)?)?;
+                }
                 let lr =
                     adamw.learning_rate * adamw.schedule.multiplier(optimizer_steps, planned_steps);
                 optimizer.set_learning_rate(lr);
@@ -271,6 +296,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         .map(|(name, var)| (name.clone(), var.as_tensor().detach()))
         .collect();
     tensors = average.finish(tensors);
+    tensors.retain(|name, _| !name.starts_with("reply."));
     let builder = VarBuilder::from_tensors(tensors.clone(), DType::F32, device);
     let net = Net::new(builder, model)?;
     let mut counts = [1.; 3];
@@ -289,7 +315,8 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     let mut eligible_losses = [0.; 2];
     for chunk in eligible.chunks(batch_size).chain(other.chunks(batch_size)) {
         let batch = Batch::new(&held_out.test, chunk, device, 0., 0., &mut hint_rng)?;
-        for (total, loss) in totals.iter_mut().zip(losses(&net, &batch)?) {
+        let (losses, _) = losses(batch.inputs.logits(&net)?, &batch)?;
+        for (total, loss) in totals.iter_mut().zip(losses) {
             *total += f64::from(loss.to_scalar::<f32>()?) * chunk.len() as f64;
         }
         if held_out.test[chunk[0].row].can_reflect {
@@ -380,7 +407,10 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         )?;
     }
     fs::write(output_dir.join("training.csv"), csv)?;
-    let timed_seconds = training_started.elapsed().as_secs_f64();
+    let target_seconds: f64 = datasets.iter().map(|d| d.target_seconds).sum();
+    let timed_seconds = training_started.elapsed().as_secs_f64() + target_seconds;
+    let setup_seconds = setup_seconds - target_seconds;
+    println!("training target preparation: {target_seconds:.2}s charged");
     println!("saved {}", output_dir.display());
     println!(
         "runtime: {timed_seconds:.2}s timed (training, held-out evaluation, and save); {setup_seconds:.2}s setup excluded; {optimizer_steps} optimizer steps ({training_seconds:.2}s training, {evaluation_seconds:.2}s held-out evaluation)"

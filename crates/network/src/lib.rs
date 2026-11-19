@@ -295,6 +295,19 @@ impl Net {
         promotes: &Tensor,
         hints: Option<&Tensor>,
     ) -> Result<(Tensor, Tensor)> {
+        let (policy, value, _) =
+            self.forward_with_features(position, move_index, promotion_index, promotes, hints)?;
+        Ok((policy, value))
+    }
+
+    fn forward_with_features(
+        &self,
+        position: &Tensor,
+        move_index: &Tensor,
+        promotion_index: &Tensor,
+        promotes: &Tensor,
+        hints: Option<&Tensor>,
+    ) -> Result<(Tensor, Tensor, Tensor)> {
         let hint = self
             .hints
             .as_ref()
@@ -308,10 +321,10 @@ impl Net {
         let policy = self.legal_policy(&encoded, move_index, promotion_index, promotes)?;
         let value_input = match (&hint, &self.value_hint_scale) {
             (Some(hint), Some(scale)) => encoded.broadcast_add(&hint.broadcast_mul(scale)?)?,
-            _ => encoded,
+            _ => encoded.clone(),
         };
         let wdl = self.value.logits(&value_input)?;
-        Ok((policy, wdl))
+        Ok((policy, wdl, encoded))
     }
 
     fn encode(&self, position: &Tensor, hints: Option<&Tensor>) -> Result<Tensor> {

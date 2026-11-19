@@ -21,6 +21,8 @@ pub struct Row {
     hint: [f32; chess_network::hints::FEATURES],
     features: Vec<f32>,
     moves: Vec<(u16, f32)>,
+    root_q: Option<f32>,
+    reply: Option<crate::reply::Reply>,
     total_visits: f32,
     pub value: [f32; 3],
     use_value: bool,
@@ -29,6 +31,7 @@ pub struct Row {
 pub struct Dataset {
     pub train: Vec<Row>,
     pub test: Vec<Row>,
+    pub target_seconds: f64,
     pub train_games: usize,
     pub value_labels_per_game: Vec<usize>,
     pub test_ids: Vec<u64>,
@@ -51,12 +54,13 @@ pub fn check_disjoint<'a>(datasets: impl IntoIterator<Item = &'a Path>) -> Resul
 
 pub fn load(
     dataset: &Path,
-    seed: u64,
+    config: &crate::config::Config,
     train_positions: usize,
-    value_sample_rate: f64,
     retain_holdout: bool,
     rescorer: &mut crate::rescoring::Rescorer,
 ) -> Result<Dataset> {
+    let seed = config.seed;
+    let value_sample_rate = config.value_sample_rate;
     let mut rows = Vec::new();
     for shard in discover_shards(dataset)? {
         read_shard(&shard, |row| {
@@ -110,11 +114,20 @@ pub fn load(
         .map(|row| row.generation_ns_per_position.map(u128::from))
         .sum::<Option<u128>>()
         .map(|ns| ns as f64 / 1e9);
+    let started = std::time::Instant::now();
+    let replies = if config.reply_weight > 0. {
+        crate::reply::targets(&train)
+    } else {
+        (0..train.len()).map(|_| None).collect()
+    };
+    let target_seconds = started.elapsed().as_secs_f64();
     Ok(Dataset {
+        target_seconds,
         train: train
             .into_iter()
             .zip(mask)
-            .map(|(mut row, use_value)| {
+            .zip(replies)
+            .map(|((mut row, use_value), reply)| {
                 let outcome = row.value;
                 let value = if use_value {
                     let repeated = history.has_repeated(&row);
@@ -123,9 +136,20 @@ pub fn load(
                     crate::rescoring::game_value(row.value)
                 };
                 let policy = rescorer.policy(&row)?;
+                let root_q = if config.root_q_weight > 0. && use_value {
+                    Some(
+                        row.position
+                            .root_q
+                            .ok_or("root_q_weight requires search values in training data")?,
+                    )
+                } else {
+                    None
+                };
                 let mut encoded = encode_row(row, use_value)?;
                 encoded.outcome = outcome;
                 encoded.total_visits = policy.iter().map(|(_, p)| p).sum();
+                encoded.reply = reply;
+                encoded.root_q = root_q;
                 encoded.moves = policy;
                 encoded.value = value;
                 Ok(encoded)
@@ -166,6 +190,8 @@ fn encode_row(row: chess_data::Row, use_value: bool) -> Result<Row> {
         outcome: row.value,
         hint: [0.; chess_network::hints::FEATURES],
         features,
+        root_q: None,
+        reply: None,
         total_visits: row
             .position
             .policy
@@ -245,6 +271,8 @@ pub struct Batch {
     pub mask: Tensor,
     pub policy: Tensor,
     pub value: Option<Tensor>,
+    pub root_q: Option<Tensor>,
+    pub reply: Option<crate::reply::Targets>,
     pub value_indices: Option<Tensor>,
     pub value_count: usize,
     pub uniform_loss: f64,
@@ -295,11 +323,13 @@ impl Batch {
         let mut policy = vec![0f32; size * width];
         let mut value = Vec::with_capacity(size);
         let mut value_indices = Vec::new();
+        let mut root_q = Vec::new();
         let mut uniform_loss = 0.;
         for (i, &row) in indices.iter().enumerate() {
             let row = &rows[row.row];
             if row.use_value {
                 value.extend_from_slice(&row.value);
+                root_q.extend(row.root_q);
                 value_indices.push(i as u32);
             }
             uniform_loss += (row.moves.len() as f64).ln();
@@ -322,6 +352,18 @@ impl Batch {
                 Some(Tensor::from_vec(value_indices, value_count, device)?)
             } else {
                 None
+            },
+            reply: crate::reply::Targets::batch(
+                indices
+                    .iter()
+                    .zip(&masks)
+                    .map(|(e, &mask)| (rows[e.row].reply.as_ref(), mask)),
+                device,
+            )?,
+            root_q: if root_q.is_empty() {
+                None
+            } else {
+                Some(Tensor::from_vec(root_q, value_count, device)?)
             },
             value_count,
             uniform_loss,
@@ -351,6 +393,7 @@ mod tests {
                                 halfmove_clock: 0,
                                 repetitions: 1,
                             },
+                            root_q: Some(0.),
                             played_move: 0,
                             policy: vec![(0, 10)],
                         },
@@ -404,6 +447,8 @@ mod tests {
             hint: [0.; chess_network::hints::FEATURES],
             features: Vec::new(),
             moves: Vec::new(),
+            root_q: None,
+            reply: None,
             total_visits: 0.,
             value: crate::rescoring::game_value(outcome),
             use_value: false,
@@ -414,6 +459,7 @@ mod tests {
                 .map(|game| row(game, [2; 10], -1))
                 .chain(std::iter::once(row(100, [1; 10], -1)))
                 .collect(),
+            target_seconds: 0.,
             train_games: 20,
             value_labels_per_game: Vec::new(),
             test_ids: Vec::new(),
@@ -455,6 +501,7 @@ mod tests {
                         repetitions: 1,
                     },
                     policy: vec![(123, 800)],
+                    root_q: Some(0.),
                     played_move: 123,
                 }
             })
@@ -472,8 +519,11 @@ mod tests {
             value_mix: 1.0,
         }
         .open()?;
-        let original = load(directory.path(), 42, 6, 0.5, true, &mut disabled)?;
-        let rescored = load(directory.path(), 42, 6, 0.5, true, &mut enabled)?;
+        use chess_config::TomlConfig;
+        let mut config = crate::config::Config::from_repo_file("training.toml")?;
+        config.value_sample_rate = 0.5;
+        let original = load(directory.path(), &config, 6, true, &mut disabled)?;
+        let rescored = load(directory.path(), &config, 6, true, &mut enabled)?;
         assert_eq!(original.test_ids, rescored.test_ids);
         assert_eq!(
             original.estimated_generation_seconds,

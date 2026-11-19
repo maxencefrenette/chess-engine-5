@@ -31,7 +31,20 @@ pub struct Config {
     seed: u64,
     #[range(min = 0.0)]
     temperature: f64,
+    cooling: Cooling,
     playout_cap: PlayoutCap,
+}
+
+#[chess_config::toml_config]
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+enum Cooling {
+    Disabled {},
+    After {
+        ply: u16,
+        #[range(min = 0.0)]
+        temperature: f64,
+    },
 }
 
 #[chess_config::toml_config]
@@ -99,6 +112,7 @@ impl ActiveGame {
                     })
                     .collect(),
                 played_move: played.packed(),
+                root_q: Some(self.search.root_value()),
             });
         }
         self.game.play_legal(played);
@@ -149,7 +163,13 @@ fn play_games(
                 pending.push((i, leaf));
             }
             if pending.len() == before
-                && let Some(outcome) = slot.play(config.temperature, full_search_rate)
+                && let Some(outcome) = slot.play(
+                    match config.cooling {
+                        Cooling::After { ply, temperature } if slot.ply >= ply => temperature,
+                        _ => config.temperature,
+                    },
+                    full_search_rate,
+                )
             {
                 let white_value = match outcome {
                     Outcome::Win(Color::White) => 1,
@@ -202,6 +222,7 @@ pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) ->
 
     let total_games = config.total_games.get();
     let games_per_shard = config.games_per_shard.get();
+    let mut generation_seconds = 0.;
     let mut shards = 0;
     let mut positions = 0;
     let mut white_wins = 0;
@@ -214,6 +235,7 @@ pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) ->
             model.evaluate(pending)
         })?;
         let elapsed = started.elapsed();
+        generation_seconds += elapsed.as_secs_f64();
         let shard_positions: usize = games.iter().map(|(_, game)| game.positions.len()).sum();
         if shard_positions == 0 {
             return Err("shard contains no full-search positions".into());
@@ -243,6 +265,7 @@ pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) ->
 
     let manifest = json!({
         "format_version": FORMAT_VERSION,
+        "generation_seconds": generation_seconds,
         "seed": config.seed,
         "engine_version": env!("CARGO_PKG_VERSION"),
         "engine_revision": env::var("CE5_ENGINE_REVISION").ok(),
@@ -264,6 +287,7 @@ pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) ->
         "leaves_per_game": config.leaves_per_game.get(),
         "sampling": "chacha8-stream-per-game; temperature applied to root visits",
         "temperature": config.temperature,
+        "cooling": config.cooling,
         "exploration": settings.exploration,
     });
     let partial = run.join("manifest.json.partial");

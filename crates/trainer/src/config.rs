@@ -14,6 +14,10 @@ pub struct Config {
     pub(crate) optimizer: OptimizerConfig,
     pub(crate) weight_averaging: WeightAveraging,
     pub(crate) reflection: Reflection,
+    #[range(min = 0.0)]
+    pub(crate) root_q_weight: f64,
+    #[range(min = 0.0)]
+    pub(crate) reply_weight: f64,
     pub(crate) seed: u64,
     #[range(min_exclusive = 0.0, max = 1.0)]
     pub(crate) value_sample_rate: f64,
