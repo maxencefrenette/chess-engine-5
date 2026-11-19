@@ -128,30 +128,31 @@ pub fn load(
             .zip(replies)
             .map(|((mut row, use_value), reply)| {
                 let outcome = row.value;
-                let value = if !use_value {
-                    crate::rescoring::game_value(outcome)
-                } else if root_fraction == 1.0 {
-                    row.position.root_wdl()
-                } else {
+                let outcome_wdl = if use_value && root_fraction < 1.0 {
                     let repeated = history.has_repeated(&row);
-                    let outcome = rescorer.value(&mut row, repeated)?;
-                    let root = row.position.root_wdl();
-                    std::array::from_fn(|i| {
-                        (1.0 - root_fraction) * outcome[i] + root_fraction * root[i]
-                    })
+                    rescorer.value(&mut row, repeated)?
+                } else {
+                    crate::rescoring::game_value(outcome)
                 };
                 let policy = rescorer.policy(&row)?;
-                let mut encoded = encode_row(&row, policy, use_value)?;
+                let mut encoded = encode_row(&row, policy, outcome_wdl, root_fraction, use_value)?;
                 encoded.outcome = outcome;
                 encoded.reply = reply;
-                encoded.value = value;
                 Ok(encoded)
             })
             .collect::<Result<_>>()?,
         test: test
             .into_iter()
             .filter(|_| retain_holdout)
-            .map(|row| encode_row(&row, crate::rescoring::search_policy(&row), true))
+            .map(|row| {
+                encode_row(
+                    &row,
+                    crate::rescoring::search_policy(&row),
+                    crate::rescoring::game_value(row.value),
+                    root_fraction,
+                    true,
+                )
+            })
             .collect::<Result<_>>()?,
         train_games: by_game.len(),
         value_labels_per_game,
@@ -160,7 +161,14 @@ pub fn load(
     })
 }
 
-fn encode_row(row: &chess_data::Row, moves: Vec<(u16, f32)>, use_value: bool) -> Result<Row> {
+fn encode_row(
+    row: &chess_data::Row,
+    moves: Vec<(u16, f32)>,
+    outcome: [f32; 3],
+    root_fraction: f32,
+    use_value: bool,
+) -> Result<Row> {
+    let root = row.position.root_wdl();
     let snapshot = &row.position.snapshot;
     let board = &snapshot.board;
     let black_to_move = !row.position.ply.is_multiple_of(2);
@@ -185,7 +193,7 @@ fn encode_row(row: &chess_data::Row, moves: Vec<(u16, f32)>, use_value: bool) ->
         reply: None,
         total_visits: moves.iter().map(|(_, visits)| visits).sum(),
         moves,
-        value: crate::rescoring::game_value(row.value),
+        value: std::array::from_fn(|i| (1. - root_fraction) * outcome[i] + root_fraction * root[i]),
         use_value,
     })
 }
@@ -292,7 +300,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn root_supervision_preserves_held_out_outcomes_and_training_masks() -> Result<()> {
+    fn both_splits_mix_root_wdl_and_only_training_masks_values() -> Result<()> {
         use chess_config::TomlConfig;
         use chess_data::{Board, Position};
         let dir = tempfile::tempdir()?;
@@ -330,10 +338,13 @@ mod tests {
             config.root_wdl_fraction = fraction;
             let data = load(dir.path(), &config, 12, true, &mut rescorer)?;
             assert_eq!(data.train.iter().filter(|row| row.use_value).count(), 6);
-            assert!(data.test.iter().all(|row| row.value == outcome));
-            for row in data.train {
-                assert_eq!(row.value, if row.use_value { target } else { outcome });
-            }
+            assert_eq!(data.test.len(), 4);
+            assert!(
+                data.test
+                    .iter()
+                    .all(|row| row.use_value && row.value == target)
+            );
+            assert!(data.train.iter().all(|row| row.value == target));
         }
         Ok(())
     }
