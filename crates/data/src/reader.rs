@@ -33,7 +33,8 @@ pub fn read_shard(path: &Path, mut visit: impl FnMut(Row) -> Result<()>) -> Resu
     let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)?;
     let has_timing = builder.schema().index_of(GENERATION_TIME_COLUMN).is_ok();
     let has_root_q = builder.schema().index_of("root_q").is_ok();
-    let expected = schema(has_timing, has_root_q);
+    let has_root_d = builder.schema().index_of("root_d").is_ok();
+    let expected = schema(has_timing, has_root_q, has_root_d);
     let mut indices = Vec::with_capacity(expected.fields().len());
     for field in expected.fields() {
         let index = builder.schema().index_of(field.name())?;
@@ -82,6 +83,11 @@ pub fn read_shard(path: &Path, mut visit: impl FnMut(Row) -> Result<()>) -> Resu
         } else {
             None
         };
+        let root_d = if has_root_d {
+            Some(next!(Float32Array))
+        } else {
+            None
+        };
         for i in 0..batch.num_rows() {
             let value = values.value(i);
             if !(-1..=1).contains(&value) {
@@ -103,6 +109,7 @@ pub fn read_shard(path: &Path, mut visit: impl FnMut(Row) -> Result<()>) -> Resu
                     policy: decode_policy(moves.value(i), visits.value(i))?,
                     played_move: played_move.value(i),
                     root_q: root_q.map(|q| q.value(i)),
+                    root_d: root_d.map(|d| d.value(i)),
                 },
             })?;
         }

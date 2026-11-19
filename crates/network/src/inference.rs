@@ -12,11 +12,12 @@ use crate::{
     checkpoint::Checkpoint,
     encode_position,
     policy_inputs::PolicyInputs,
-    value::{ValueConfig, expected_value},
+    value::{ValueConfig, score_and_draw},
 };
 
 pub struct Prediction {
     pub value: f32,
+    pub draw: f32,
     pub priors: Vec<f32>,
 }
 
@@ -120,7 +121,7 @@ fn predictions(
         .zip(logits)
         .zip(value_logits)
         .map(|((moves, mut priors), wdl)| {
-            let value = expected_value(wdl.try_into().expect("three WDL logits"));
+            let (value, draw) = score_and_draw(wdl.try_into().expect("three WDL logits"));
             priors.truncate(moves.len());
             if priors.is_empty()
                 || !value.is_finite()
@@ -136,7 +137,11 @@ fn predictions(
             for prior in &mut priors {
                 *prior /= sum;
             }
-            Ok(Prediction { value, priors })
+            Ok(Prediction {
+                value,
+                draw,
+                priors,
+            })
         })
         .collect()
 }

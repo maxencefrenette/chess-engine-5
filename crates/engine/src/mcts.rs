@@ -16,6 +16,7 @@ struct Node {
     pending: u32,
     prior: f32,
     value_sum: f32,
+    draw_sum: f32,
     state: NodeState,
 }
 
@@ -67,10 +68,11 @@ impl Tree {
         value + exploration * node.prior * parent_scale / (1.0 + visits as f32)
     }
 
-    fn backup(&mut self, path: &[usize], mut value: f32) {
+    fn backup(&mut self, path: &[usize], mut value: f32, draw: f32) {
         for &index in path.iter().rev() {
             self.nodes[index].visits += 1;
             self.nodes[index].value_sum += value;
+            self.nodes[index].draw_sum += draw;
             value = -value;
         }
     }
@@ -136,19 +138,19 @@ impl Search {
                     }
                 }
             };
-            self.tree.backup(&self.path, value);
+            self.tree.backup(&self.path, value, f32::from(value == 0.0));
         }
         None
     }
 
-    pub fn evaluate(&mut self, leaf: Leaf, value: f32, priors: &[f32]) {
+    pub fn evaluate(&mut self, leaf: Leaf, value: f32, draw: f32, priors: &[f32]) {
         let index = *leaf.path.last().expect("a leaf has a path");
         for &node in &leaf.path {
             self.tree.nodes[node].pending -= 1;
         }
         self.tree.expand(index, leaf.moves, priors);
         if index != 0 {
-            self.tree.backup(&leaf.path, value);
+            self.tree.backup(&leaf.path, value, draw);
         }
         self.path = leaf.path;
     }
@@ -208,6 +210,11 @@ impl Search {
         root.value_sum / root.visits as f32
     }
 
+    pub fn root_draw(&self) -> f32 {
+        let root = &self.tree.nodes[0];
+        root.draw_sum / root.visits as f32
+    }
+
     pub fn visits(&self) -> impl DoubleEndedIterator<Item = MoveVisits> + '_ {
         let NodeState::Branch(children) = &self.tree.nodes[0].state else {
             unreachable!("root must be expanded");
@@ -232,15 +239,38 @@ mod tests {
         let mut priors = vec![0.; root.moves.len()];
         *priors.last_mut().unwrap() = 1.;
         let expected = *root.moves.last().unwrap();
-        search.evaluate(root, 0., &priors);
+        search.evaluate(root, 0., 0.5, &priors);
         let child = search.next_leaf(&game, budget, 1.4).unwrap();
         let priors = vec![1. / child.moves.len() as f32; child.moves.len()];
-        search.evaluate(child, 0., &priors);
+        search.evaluate(child, 0., 0.5, &priors);
         assert!(search.next_leaf(&game, budget, 1.4).is_none());
         let visited: Vec<_> = search.visits().filter(|entry| entry.visits != 0).collect();
         assert_eq!(visited.len(), 1);
         assert_eq!(visited[0].mv, expected);
         assert_eq!(visited[0].visits, 1);
+    }
+
+    #[test]
+    fn backup_changes_score_perspective_and_preserves_draws() {
+        let mut tree = Tree::default();
+        tree.nodes.resize_with(3, Node::default);
+        tree.backup(&[0, 1, 2], 0.25, 0.5);
+        for (node, score) in tree.nodes.iter().zip([0.25, -0.25, 0.25]) {
+            assert_eq!((node.value_sum, node.draw_sum), (score, 0.5));
+        }
+        for (fen, q, d) in [
+            ("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1", 0., 1.),
+            ("7k/6Q1/6K1/8/8/8/8/8 b - - 0 1", -1., 0.),
+        ] {
+            let mut search = Search::new();
+            let game = Game::from_fen(fen).unwrap();
+            assert!(
+                search
+                    .next_leaf(&game, NonZeroU32::new(4).unwrap(), 1.4)
+                    .is_none()
+            );
+            assert_eq!((search.root_value(), search.root_draw()), (q, d));
+        }
     }
 
     #[test]
@@ -252,7 +282,7 @@ mod tests {
         assert!(search.next_leaf(&game, budget, 1.4).is_none());
         let uniform = |leaf: &Leaf| vec![1.0 / leaf.moves.len() as f32; leaf.moves.len()];
         let priors = uniform(&root);
-        search.evaluate(root, 0.0, &priors);
+        search.evaluate(root, 0.0, 0.5, &priors);
 
         let first = search.next_leaf(&game, budget, 1.4).unwrap();
         let second = search.next_leaf(&game, budget, 1.4).unwrap();
@@ -261,13 +291,14 @@ mod tests {
         assert_eq!(search.visits().map(|entry| entry.visits).sum::<u32>(), 0);
         for leaf in [second, first] {
             let priors = uniform(&leaf);
-            search.evaluate(leaf, 0.25, &priors);
+            search.evaluate(leaf, 0.25, 0.5, &priors);
         }
 
         assert!(search.next_leaf(&game, budget, 1.4).is_none());
         assert_eq!(search.visits().filter(|entry| entry.visits == 1).count(), 2);
         assert!(search.tree.nodes.iter().all(|node| node.pending == 0));
         assert_eq!(search.root_value(), -0.25);
+        assert_eq!(search.root_draw(), 0.5);
     }
 
     #[test]
@@ -286,7 +317,7 @@ mod tests {
         let mut search = Search::new();
         while let Some(leaf) = search.next_leaf(&game, budget, 1.4) {
             let priors = vec![1. / leaf.moves.len() as f32; leaf.moves.len()];
-            search.evaluate(leaf, 0., &priors);
+            search.evaluate(leaf, 0., 0.5, &priors);
         }
         let visits: Vec<_> = search.visits().collect();
         assert_eq!(

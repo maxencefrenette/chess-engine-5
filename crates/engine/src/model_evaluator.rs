@@ -59,7 +59,7 @@ impl ModelEvaluator {
             let batch = [(0, leaf)];
             let result = self.evaluate(&batch)?.pop().expect("one prediction");
             let [(_, leaf)] = batch;
-            search.evaluate(leaf, result.value, &result.priors);
+            search.evaluate(leaf, result.value, result.draw, &result.priors);
         }
         Ok(search.visits().collect())
     }

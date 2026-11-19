@@ -21,7 +21,6 @@ pub struct Row {
     hint: [f32; chess_network::hints::FEATURES],
     features: Vec<f32>,
     moves: Vec<(u16, f32)>,
-    root_q: Option<f32>,
     reply: Option<crate::reply::Reply>,
     total_visits: f32,
     pub value: [f32; 3],
@@ -61,6 +60,7 @@ pub fn load(
 ) -> Result<Dataset> {
     let seed = config.seed;
     let value_sample_rate = config.value_sample_rate;
+    let root_fraction = config.root_wdl_fraction as f32;
     let mut rows = Vec::new();
     for shard in discover_shards(dataset)? {
         read_shard(&shard, |row| {
@@ -129,27 +129,27 @@ pub fn load(
             .zip(replies)
             .map(|((mut row, use_value), reply)| {
                 let outcome = row.value;
-                let value = if use_value {
-                    let repeated = history.has_repeated(&row);
-                    rescorer.value(&mut row, repeated)?
+                let value = if !use_value {
+                    crate::rescoring::game_value(outcome)
+                } else if root_fraction == 1.0 {
+                    root_wdl(&row.position)?
                 } else {
-                    crate::rescoring::game_value(row.value)
+                    let repeated = history.has_repeated(&row);
+                    let outcome = rescorer.value(&mut row, repeated)?;
+                    if root_fraction == 0.0 {
+                        outcome
+                    } else {
+                        let root = root_wdl(&row.position)?;
+                        std::array::from_fn(|i| {
+                            (1.0 - root_fraction) * outcome[i] + root_fraction * root[i]
+                        })
+                    }
                 };
                 let policy = rescorer.policy(&row)?;
-                let root_q = if config.root_q_weight > 0. && use_value {
-                    Some(
-                        row.position
-                            .root_q
-                            .ok_or("root_q_weight requires search values in training data")?,
-                    )
-                } else {
-                    None
-                };
                 let mut encoded = encode_row(row, use_value)?;
                 encoded.outcome = outcome;
                 encoded.total_visits = policy.iter().map(|(_, p)| p).sum();
                 encoded.reply = reply;
-                encoded.root_q = root_q;
                 encoded.moves = policy;
                 encoded.value = value;
                 Ok(encoded)
@@ -165,6 +165,18 @@ pub fn load(
         test_ids,
         estimated_generation_seconds,
     })
+}
+
+fn root_wdl(position: &chess_data::Position) -> Result<[f32; 3]> {
+    let d = position.root_d.ok_or("training requires root_d")?;
+    let q = position.root_q.ok_or("training requires root_q")?;
+    let decisive = 1. - d;
+    if !(0.0..=1.0).contains(&d) || !q.is_finite() || q.abs() > decisive + 1e-4 {
+        return Err(format!("invalid root WDL with q={q} d={d}").into());
+    }
+    // Independent f32 sums can put Q a few ulps outside the feasible interval.
+    let q = q.clamp(-decisive, decisive);
+    Ok([(decisive - q) * 0.5, d, (decisive + q) * 0.5])
 }
 
 fn encode_row(row: chess_data::Row, use_value: bool) -> Result<Row> {
@@ -190,7 +202,6 @@ fn encode_row(row: chess_data::Row, use_value: bool) -> Result<Row> {
         outcome: row.value,
         hint: [0.; chess_network::hints::FEATURES],
         features,
-        root_q: None,
         reply: None,
         total_visits: row
             .position
@@ -271,7 +282,6 @@ pub struct Batch {
     pub mask: Tensor,
     pub policy: Tensor,
     pub value: Option<Tensor>,
-    pub root_q: Option<Tensor>,
     pub reply: Option<crate::reply::Targets>,
     pub value_indices: Option<Tensor>,
     pub value_count: usize,
@@ -323,13 +333,11 @@ impl Batch {
         let mut policy = vec![0f32; size * width];
         let mut value = Vec::with_capacity(size);
         let mut value_indices = Vec::new();
-        let mut root_q = Vec::new();
         let mut uniform_loss = 0.;
         for (i, &row) in indices.iter().enumerate() {
             let row = &rows[row.row];
             if row.use_value {
                 value.extend_from_slice(&row.value);
-                root_q.extend(row.root_q);
                 value_indices.push(i as u32);
             }
             uniform_loss += (row.moves.len() as f64).ln();
@@ -360,11 +368,6 @@ impl Batch {
                     .map(|(e, &mask)| (rows[e.row].reply.as_ref(), mask)),
                 device,
             )?,
-            root_q: if root_q.is_empty() {
-                None
-            } else {
-                Some(Tensor::from_vec(root_q, value_count, device)?)
-            },
             value_count,
             uniform_loss,
         })
@@ -374,6 +377,53 @@ impl Batch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_supervision_preserves_held_out_outcomes_and_training_masks() -> Result<()> {
+        use chess_config::TomlConfig;
+        use chess_data::{Board, Position};
+        let dir = tempfile::tempdir()?;
+        let positions = [0, 1, 2, 3].map(|ply| Position {
+            ply,
+            snapshot: Board {
+                board: [0; 32],
+                castling: 0,
+                ep_square: 64,
+                halfmove_clock: 0,
+                repetitions: 0,
+            },
+            policy: vec![(0, 1)],
+            played_move: 0,
+            root_q: Some(0.25),
+            root_d: Some(0.5),
+        });
+        chess_data::write_shard(
+            dir.path(),
+            0,
+            (0..4).map(|id| (id, positions.as_slice(), 0)),
+            42,
+        )?;
+        let mut config = crate::config::Config::from_repo_file("training.toml")?;
+        config.value_sample_rate = 0.5;
+        config.reply_weight = 0.;
+        let mut rescorer = crate::config::RescoringConfig::Disabled.open()?;
+        let outcome = [0., 1., 0.];
+        for (fraction, target) in [
+            (0.0, outcome),
+            (0.25, [0.03125, 0.875, 0.09375]),
+            (0.5, [0.0625, 0.75, 0.1875]),
+            (1.0, [0.125, 0.5, 0.375]),
+        ] {
+            config.root_wdl_fraction = fraction;
+            let data = load(dir.path(), &config, 12, true, &mut rescorer)?;
+            assert_eq!(data.train.iter().filter(|row| row.use_value).count(), 6);
+            assert!(data.test.iter().all(|row| row.value == outcome));
+            for row in data.train {
+                assert_eq!(row.value, if row.use_value { target } else { outcome });
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn both_views_adds_one_copy_only_after_all_castling_rights_are_lost() -> Result<()> {
@@ -394,6 +444,7 @@ mod tests {
                                 repetitions: 1,
                             },
                             root_q: Some(0.),
+                            root_d: Some(0.5),
                             played_move: 0,
                             policy: vec![(0, 10)],
                         },
@@ -447,7 +498,6 @@ mod tests {
             hint: [0.; chess_network::hints::FEATURES],
             features: Vec::new(),
             moves: Vec::new(),
-            root_q: None,
             reply: None,
             total_visits: 0.,
             value: crate::rescoring::game_value(outcome),
@@ -502,6 +552,7 @@ mod tests {
                     },
                     policy: vec![(123, 800)],
                     root_q: Some(0.),
+                    root_d: Some(0.5),
                     played_move: 123,
                 }
             })

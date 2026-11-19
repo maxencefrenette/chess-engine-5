@@ -75,6 +75,7 @@ fn cuda_replays_match_eager_with_changing_inputs() -> Result<(), Box<dyn std::er
         assert_eq!(actual.len(), size);
         for (actual, expected) in actual.iter().zip(unpadded) {
             assert_eq!(actual.value, expected.value);
+            assert_eq!(actual.draw, expected.draw);
             assert_eq!(actual.priors, expected.priors);
         }
     }
@@ -192,6 +193,7 @@ fn material_hints_survive_cuda_graph_replay() -> Result<(), Box<dyn std::error::
             )?;
             for (actual, expected) in actual.iter().zip(expected) {
                 assert_eq!(actual.value, expected.value);
+                assert_eq!(actual.draw, expected.draw);
                 assert_eq!(actual.priors, expected.priors);
             }
         }

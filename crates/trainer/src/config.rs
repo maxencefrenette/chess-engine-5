@@ -15,12 +15,12 @@ pub struct Config {
     pub(crate) weight_averaging: WeightAveraging,
     pub(crate) reflection: Reflection,
     #[range(min = 0.0)]
-    pub(crate) root_q_weight: f64,
-    #[range(min = 0.0)]
     pub(crate) reply_weight: f64,
     pub(crate) seed: u64,
     #[range(min_exclusive = 0.0, max = 1.0)]
     pub(crate) value_sample_rate: f64,
+    #[range(min = 0.0, max = 1.0)]
+    pub(crate) root_wdl_fraction: f64,
     #[range(min_exclusive = 0.0)]
     pub(crate) value_loss_weight: f64,
     pub(crate) value_rescoring: RescoringConfig,

@@ -113,6 +113,7 @@ impl ActiveGame {
                     .collect(),
                 played_move: played.packed(),
                 root_q: Some(self.search.root_value()),
+                root_d: Some(self.search.root_draw()),
             });
         }
         self.game.play_legal(played);
@@ -183,7 +184,7 @@ fn play_games(
         for ((i, leaf), result) in pending.into_iter().zip(evaluations) {
             active[i]
                 .search
-                .evaluate(leaf, result.value, &result.priors);
+                .evaluate(leaf, result.value, result.draw, &result.priors);
         }
         for (i, white_value) in finished.into_iter().rev() {
             let slot = if let Some(id) = ids.next() {
@@ -320,6 +321,7 @@ mod tests {
                         .iter()
                         .map(|(_, leaf)| Prediction {
                             value: 0.0,
+                            draw: 0.5,
                             priors: vec![1.0 / leaf.moves.len() as f32; leaf.moves.len()],
                         })
                         .collect())

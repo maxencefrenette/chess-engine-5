@@ -39,9 +39,9 @@ impl ValueHead {
     }
 }
 
-pub(crate) fn expected_value(logits: [f32; 3]) -> f32 {
+pub(crate) fn score_and_draw(logits: [f32; 3]) -> (f32, f32) {
     let max = logits.into_iter().fold(f32::NEG_INFINITY, f32::max);
     let wdl = logits.map(|logit| (logit - max).exp());
     let sum = wdl.iter().sum::<f32>();
-    wdl[2] / sum - wdl[0] / sum
+    (wdl[2] / sum - wdl[0] / sum, wdl[1] / sum)
 }

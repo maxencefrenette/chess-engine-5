@@ -32,30 +32,20 @@ fn soft_value_loss(logits: &Tensor, targets: &Tensor) -> candle_core::Result<Ten
         .mean_all()
 }
 
-fn losses(
-    logits: (Tensor, Tensor),
-    batch: &Batch,
-) -> candle_core::Result<([Tensor; 2], Option<Tensor>)> {
+fn losses(logits: (Tensor, Tensor), batch: &Batch) -> candle_core::Result<[Tensor; 2]> {
     let (policy, wdl) = logits;
     let log_probs = log_softmax(&(&policy + &batch.mask)?, 1)?;
     let policy = (&log_probs * &batch.policy)?.sum(1)?.neg()?.mean_all()?;
-    let mut root_error = None;
     let value = if let Some(targets) = &batch.value {
         let wdl = match &batch.value_indices {
             Some(indices) => wdl.index_select(indices, 0)?,
             None => wdl,
         };
-        let loss = soft_value_loss(&wdl, targets)?;
-        if let Some(q) = &batch.root_q {
-            let probs = candle_nn::ops::softmax(&wdl, 1)?;
-            let ev = (probs.narrow(1, 2, 1)? - probs.narrow(1, 0, 1)?)?.squeeze(1)?;
-            root_error = Some((ev - q)?.sqr()?.mean_all()?);
-        }
-        loss
+        soft_value_loss(&wdl, targets)?
     } else {
         Tensor::zeros((), policy.dtype(), policy.device())?
     };
-    Ok(([policy, value], root_error))
+    Ok([policy, value])
 }
 
 pub fn run(config: Config, device: &Device) -> Result<()> {
@@ -204,12 +194,8 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
                     &mut hint_rng,
                 )?;
                 let (policy, wdl, encoded) = batch.inputs.logits_with_features(&net)?;
-                let ([policy, value], root_error) = losses((policy, wdl), &batch)?;
-                let value_objective = match root_error {
-                    Some(error) => (&value + (error * config.root_q_weight)?)?,
-                    None => value.clone(),
-                };
-                let mut objective = (&policy + (value_objective * value_loss_weight)?)?;
+                let [policy, value] = losses((policy, wdl), &batch)?;
+                let mut objective = (&policy + (&value * value_loss_weight)?)?;
                 if let (Some(head), Some(target)) = (&reply_head, &batch.reply) {
                     objective =
                         (objective + (head.loss(&encoded, target)? * config.reply_weight)?)?;
@@ -315,7 +301,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     let mut eligible_losses = [0.; 2];
     for chunk in eligible.chunks(batch_size).chain(other.chunks(batch_size)) {
         let batch = Batch::new(&held_out.test, chunk, device, 0., 0., &mut hint_rng)?;
-        let (losses, _) = losses(batch.inputs.logits(&net)?, &batch)?;
+        let losses = losses(batch.inputs.logits(&net)?, &batch)?;
         for (total, loss) in totals.iter_mut().zip(losses) {
             *total += f64::from(loss.to_scalar::<f32>()?) * chunk.len() as f64;
         }

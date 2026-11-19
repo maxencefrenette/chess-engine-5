@@ -339,7 +339,7 @@ pub fn run(
             for ((slot, leaf), result) in batch.into_iter().zip(evaluations) {
                 active[slot]
                     .search
-                    .evaluate(leaf, result.value, &result.priors);
+                    .evaluate(leaf, result.value, result.draw, &result.priors);
             }
         }
         for i in finished.into_iter().rev() {

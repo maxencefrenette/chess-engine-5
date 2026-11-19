@@ -1,4 +1,4 @@
-model = "/data/chess/chess-engine-5/models/supervision-queue-2026.11.18/opponent-reply-policy/reply-0.15"
+model = "/data/chess/chess-engine-5/models/root-wdl-2026.11.18/root-value-sampling-and-weight/weight-0.3-rate-0.5"
 output_dir = "/data/chess/chess-engine-5/training-data"
 device = "cuda"
 total_games = 2500

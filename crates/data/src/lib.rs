@@ -10,7 +10,7 @@ use arrow_schema::{DataType, Field, Schema, SchemaRef};
 pub use reader::{discover_shards, read_shard};
 pub use writer::write_shard;
 
-pub const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 4;
 const GENERATION_TIME_COLUMN: &str = "generation_ns_per_position";
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -33,6 +33,8 @@ pub struct Position {
     pub played_move: u16,
     /// Mean backed-up score from the side to move. Absent in older shards.
     pub root_q: Option<f32>,
+    /// Mean backed-up draw probability, available since v4.
+    pub root_d: Option<f32>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -45,7 +47,7 @@ pub struct Row {
     pub generation_ns_per_position: Option<u64>,
 }
 
-fn schema(has_timing: bool, has_root_q: bool) -> SchemaRef {
+fn schema(has_timing: bool, has_root_q: bool, has_root_d: bool) -> SchemaRef {
     let mut fields = vec![
         Field::new("game_id", DataType::UInt64, false),
         Field::new("ply", DataType::UInt16, false),
@@ -64,6 +66,9 @@ fn schema(has_timing: bool, has_root_q: bool) -> SchemaRef {
     }
     if has_root_q {
         fields.push(Field::new("root_q", DataType::Float32, false));
+    }
+    if has_root_d {
+        fields.push(Field::new("root_d", DataType::Float32, false));
     }
     Arc::new(Schema::new(fields))
 }
@@ -87,6 +92,7 @@ mod tests {
             policy: vec![(0x10ff, 15), (0x0402, 1), (0x0003, 0)],
             played_move: 0x10ff,
             root_q: Some(-0.375),
+            root_d: Some(0.5),
         });
 
         write_shard(dir.path(), 0, [(123, positions.as_slice(), 1)], 1234)?;
