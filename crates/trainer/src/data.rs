@@ -34,7 +34,7 @@ pub struct Dataset {
     pub train_games: usize,
     pub value_labels_per_game: Vec<usize>,
     pub test_ids: Vec<u64>,
-    pub estimated_generation_seconds: Option<f64>,
+    pub estimated_generation_seconds: f64,
 }
 
 pub fn check_disjoint<'a>(datasets: impl IntoIterator<Item = &'a Path>) -> Result<()> {
@@ -111,9 +111,9 @@ pub fn load(
     }
     let estimated_generation_seconds = train
         .iter()
-        .map(|row| row.generation_ns_per_position.map(u128::from))
-        .sum::<Option<u128>>()
-        .map(|ns| ns as f64 / 1e9);
+        .map(|row| u128::from(row.generation_ns_per_position))
+        .sum::<u128>() as f64
+        / 1e9;
     let started = std::time::Instant::now();
     let replies = if config.reply_weight > 0. {
         crate::reply::targets(&train)
@@ -132,18 +132,14 @@ pub fn load(
                 let value = if !use_value {
                     crate::rescoring::game_value(outcome)
                 } else if root_fraction == 1.0 {
-                    root_wdl(&row.position)?
+                    row.position.root_wdl()
                 } else {
                     let repeated = history.has_repeated(&row);
                     let outcome = rescorer.value(&mut row, repeated)?;
-                    if root_fraction == 0.0 {
-                        outcome
-                    } else {
-                        let root = root_wdl(&row.position)?;
-                        std::array::from_fn(|i| {
-                            (1.0 - root_fraction) * outcome[i] + root_fraction * root[i]
-                        })
-                    }
+                    let root = row.position.root_wdl();
+                    std::array::from_fn(|i| {
+                        (1.0 - root_fraction) * outcome[i] + root_fraction * root[i]
+                    })
                 };
                 let policy = rescorer.policy(&row)?;
                 let mut encoded = encode_row(row, use_value)?;
@@ -165,18 +161,6 @@ pub fn load(
         test_ids,
         estimated_generation_seconds,
     })
-}
-
-fn root_wdl(position: &chess_data::Position) -> Result<[f32; 3]> {
-    let d = position.root_d.ok_or("training requires root_d")?;
-    let q = position.root_q.ok_or("training requires root_q")?;
-    let decisive = 1. - d;
-    if !(0.0..=1.0).contains(&d) || !q.is_finite() || q.abs() > decisive + 1e-4 {
-        return Err(format!("invalid root WDL with q={q} d={d}").into());
-    }
-    // Independent f32 sums can put Q a few ulps outside the feasible interval.
-    let q = q.clamp(-decisive, decisive);
-    Ok([(decisive - q) * 0.5, d, (decisive + q) * 0.5])
 }
 
 fn encode_row(row: chess_data::Row, use_value: bool) -> Result<Row> {
@@ -394,8 +378,8 @@ mod tests {
             },
             policy: vec![(0, 1)],
             played_move: 0,
-            root_q: Some(0.25),
-            root_d: Some(0.5),
+            root_q: 0.25,
+            root_d: 0.5,
         });
         chess_data::write_shard(
             dir.path(),
@@ -433,7 +417,7 @@ mod tests {
                     chess_data::Row {
                         game_id: 0,
                         value: 0,
-                        generation_ns_per_position: None,
+                        generation_ns_per_position: 0,
                         position: chess_data::Position {
                             ply: 1,
                             snapshot: chess_data::Board {
@@ -443,8 +427,8 @@ mod tests {
                                 halfmove_clock: 0,
                                 repetitions: 1,
                             },
-                            root_q: Some(0.),
-                            root_d: Some(0.5),
+                            root_q: 0.,
+                            root_d: 0.5,
                             played_move: 0,
                             policy: vec![(0, 10)],
                         },
@@ -513,7 +497,7 @@ mod tests {
             train_games: 20,
             value_labels_per_game: Vec::new(),
             test_ids: Vec::new(),
-            estimated_generation_seconds: None,
+            estimated_generation_seconds: 0.0,
         }];
         let config = HintConfig::Material {
             min_games: 20.try_into().unwrap(),
@@ -551,8 +535,8 @@ mod tests {
                         repetitions: 1,
                     },
                     policy: vec![(123, 800)],
-                    root_q: Some(0.),
-                    root_d: Some(0.5),
+                    root_q: 0.,
+                    root_d: 0.5,
                     played_move: 123,
                 }
             })

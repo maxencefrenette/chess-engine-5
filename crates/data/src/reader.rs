@@ -10,7 +10,7 @@ use arrow_array::{
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-use crate::{Board, GENERATION_TIME_COLUMN, Position, Result, Row, schema};
+use crate::{Board, Position, Result, Row, schema};
 
 /// Accept a single shard or list the Parquet files in a directory in path order.
 pub fn discover_shards(path: &Path) -> io::Result<Vec<PathBuf>> {
@@ -31,10 +31,7 @@ pub fn discover_shards(path: &Path) -> io::Result<Vec<PathBuf>> {
 /// Decode a shard one Arrow batch at a time, visiting rows in file order.
 pub fn read_shard(path: &Path, mut visit: impl FnMut(Row) -> Result<()>) -> Result<()> {
     let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)?;
-    let has_timing = builder.schema().index_of(GENERATION_TIME_COLUMN).is_ok();
-    let has_root_q = builder.schema().index_of("root_q").is_ok();
-    let has_root_d = builder.schema().index_of("root_d").is_ok();
-    let expected = schema(has_timing, has_root_q, has_root_d);
+    let expected = schema();
     let mut indices = Vec::with_capacity(expected.fields().len());
     for field in expected.fields() {
         let index = builder.schema().index_of(field.name())?;
@@ -72,45 +69,34 @@ pub fn read_shard(path: &Path, mut visit: impl FnMut(Row) -> Result<()>) -> Resu
         let visits = next!(BinaryArray);
         let played_move = next!(UInt16Array);
         let values = next!(Int8Array);
-        let timing = if has_timing {
-            Some(next!(UInt64Array))
-        } else {
-            None
-        };
-
-        let root_q = if has_root_q {
-            Some(next!(Float32Array))
-        } else {
-            None
-        };
-        let root_d = if has_root_d {
-            Some(next!(Float32Array))
-        } else {
-            None
-        };
+        let timing = next!(UInt64Array);
+        let root_q = next!(Float32Array);
+        let root_d = next!(Float32Array);
         for i in 0..batch.num_rows() {
             let value = values.value(i);
             if !(-1..=1).contains(&value) {
                 return Err("invalid game result".into());
             }
+            let position = Position {
+                ply: ply.value(i),
+                snapshot: Board {
+                    board: board.value(i).try_into()?,
+                    castling: castling.value(i),
+                    ep_square: ep.value(i),
+                    halfmove_clock: clock.value(i),
+                    repetitions: repetitions.value(i),
+                },
+                policy: decode_policy(moves.value(i), visits.value(i))?,
+                played_move: played_move.value(i),
+                root_q: root_q.value(i),
+                root_d: root_d.value(i),
+            };
+            position.validate_root()?;
             visit(Row {
                 game_id: ids.value(i),
                 value,
-                generation_ns_per_position: timing.map(|column| column.value(i)),
-                position: Position {
-                    ply: ply.value(i),
-                    snapshot: Board {
-                        board: board.value(i).try_into()?,
-                        castling: castling.value(i),
-                        ep_square: ep.value(i),
-                        halfmove_clock: clock.value(i),
-                        repetitions: repetitions.value(i),
-                    },
-                    policy: decode_policy(moves.value(i), visits.value(i))?,
-                    played_move: played_move.value(i),
-                    root_q: root_q.map(|q| q.value(i)),
-                    root_d: root_d.map(|d| d.value(i)),
-                },
+                generation_ns_per_position: timing.value(i),
+                position,
             })?;
         }
     }
@@ -118,7 +104,7 @@ pub fn read_shard(path: &Path, mut visit: impl FnMut(Row) -> Result<()>) -> Resu
 }
 
 fn decode_policy(moves: &[u8], visits: &[u8]) -> Result<Vec<(u16, u16)>> {
-    if moves.is_empty() || moves.len() != visits.len() || !moves.len().is_multiple_of(2) {
+    if moves.len() != visits.len() || !moves.len().is_multiple_of(2) {
         return Err("invalid packed policy lengths".into());
     }
     let pairs: Vec<_> = moves

@@ -19,12 +19,12 @@ fn row(pieces: &[(usize, u8)], black: bool) -> Row {
                 repetitions: 1,
             },
             policy: vec![(123, 800)],
-            root_q: Some(0.),
-            root_d: Some(0.5),
+            root_q: 0.,
+            root_d: 0.5,
             played_move: 123,
         },
         value: 0,
-        generation_ns_per_position: Some(42),
+        generation_ns_per_position: 42,
     }
 }
 
@@ -90,7 +90,7 @@ fn downloaded_tables_respect_side_clock_and_castling() -> Result<()> {
         rescorer.rescore(&mut row)?;
         assert_eq!(row.value, expected);
         assert_eq!(row.position.policy, [(123, 800)]);
-        assert_eq!(row.generation_ns_per_position, Some(42));
+        assert_eq!(row.generation_ns_per_position, 42);
         row.position.snapshot.halfmove_clock = 99;
         rescorer.rescore(&mut row)?;
         assert_eq!(row.value, 0, "not enough time to mate or reset the clock");

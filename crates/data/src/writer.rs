@@ -22,7 +22,7 @@ pub fn write_shard<'a>(
     games: impl IntoIterator<Item = (u64, &'a [Position], i8)>,
     generation_ns_per_position: u64,
 ) -> Result<()> {
-    let schema = schema(true, true, true);
+    let schema = schema();
     let path = directory.join(format!("part-{index:05}.parquet"));
     let partial = path.with_extension("parquet.partial");
     let props = WriterProperties::builder()
@@ -61,6 +61,7 @@ fn encode_game(
     let mut moves = Vec::new();
     let mut visits = Vec::new();
     for row in rows {
+        row.validate_root()?;
         board.append_value(row.snapshot.board)?;
         moves.clear();
         visits.clear();
@@ -107,23 +108,11 @@ fn encode_game(
                 generation_ns_per_position;
                 rows.len()
             ])),
-            Arc::new(Float32Array::from(
-                rows.iter()
-                    .map(|row| {
-                        row.root_q
-                            .filter(|v| (-1.0..=1.0).contains(v))
-                            .ok_or("missing or invalid root value")
-                    })
-                    .collect::<std::result::Result<Vec<_>, _>>()?,
+            Arc::new(Float32Array::from_iter_values(
+                rows.iter().map(|row| row.root_q),
             )),
-            Arc::new(Float32Array::from(
-                rows.iter()
-                    .map(|row| {
-                        row.root_d
-                            .filter(|d| (0.0..=1.0).contains(d))
-                            .ok_or("missing or invalid root draw probability")
-                    })
-                    .collect::<std::result::Result<Vec<_>, _>>()?,
+            Arc::new(Float32Array::from_iter_values(
+                rows.iter().map(|row| row.root_d),
             )),
         ],
     )?)

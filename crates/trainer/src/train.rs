@@ -117,7 +117,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     let generation_seconds = datasets
         .iter()
         .map(|data| data.estimated_generation_seconds)
-        .sum::<Option<f64>>();
+        .sum::<f64>();
     println!(
         "train: {} games / {} positions; test: {} games / {} positions",
         train_games,
@@ -340,7 +340,8 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         phase_examples.last().unwrap().len()
     );
 
-    let mut metrics = json!({
+    let metrics = json!({
+        "estimated_generation_seconds": generation_seconds,
         "completed_epochs": completed_epochs,
         "partial_epoch_positions": partial_epoch_positions,
         "optimizer_steps": optimizer_steps,
@@ -364,9 +365,6 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         "test_wdl_loss": value,
         "prior_wdl_loss": value_baseline,
     });
-    if let Some(generation) = generation_seconds {
-        metrics["estimated_generation_seconds"] = json!(generation);
-    }
     if matches!(
         model.hints,
         chess_network::hints::HintConfig::Material { .. }
@@ -401,14 +399,10 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     println!(
         "runtime: {timed_seconds:.2}s timed (training, held-out evaluation, and save); {setup_seconds:.2}s setup excluded; {optimizer_steps} optimizer steps ({training_seconds:.2}s training, {evaluation_seconds:.2}s held-out evaluation)"
     );
-    if let Some(generation) = generation_seconds {
-        let spent = timed_seconds + GENERATION_BUDGET_WEIGHT * generation;
-        println!(
-            "training budget: {spent:.2}s spent ({timed_seconds:.2}s timed runtime + {GENERATION_BUDGET_WEIGHT} × {generation:.2}s estimated generation)"
-        );
-    } else {
-        println!("training budget: unavailable because the dataset is missing generation timings");
-    }
+    let spent = timed_seconds + GENERATION_BUDGET_WEIGHT * generation_seconds;
+    println!(
+        "training budget: {spent:.2}s spent ({timed_seconds:.2}s timed runtime + {GENERATION_BUDGET_WEIGHT} × {generation_seconds:.2}s estimated generation)"
+    );
     Ok(())
 }
 

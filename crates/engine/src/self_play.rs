@@ -112,8 +112,8 @@ impl ActiveGame {
                     })
                     .collect(),
                 played_move: played.packed(),
-                root_q: Some(self.search.root_value()),
-                root_d: Some(self.search.root_draw()),
+                root_q: self.search.root_value(),
+                root_d: self.search.root_draw(),
             });
         }
         self.game.play_legal(played);

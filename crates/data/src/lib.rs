@@ -11,7 +11,6 @@ pub use reader::{discover_shards, read_shard};
 pub use writer::write_shard;
 
 pub const FORMAT_VERSION: u32 = 4;
-const GENERATION_TIME_COLUMN: &str = "generation_ns_per_position";
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -31,10 +30,29 @@ pub struct Position {
     /// Packed move IDs and their visit counts, in matching order.
     pub policy: Vec<(u16, u16)>,
     pub played_move: u16,
-    /// Mean backed-up score from the side to move. Absent in older shards.
-    pub root_q: Option<f32>,
-    /// Mean backed-up draw probability, available since v4.
-    pub root_d: Option<f32>,
+    /// Mean backed-up score from the side to move.
+    pub root_q: f32,
+    /// Mean backed-up draw probability.
+    pub root_d: f32,
+}
+
+impl Position {
+    fn validate_root(&self) -> Result<()> {
+        // Independent f32 sums can put Q just outside the decisive probability mass.
+        let max_q = (1.0 - self.root_d + 1e-4).min(1.0);
+        if (0.0..=1.0).contains(&self.root_d) && self.root_q.abs() <= max_q {
+            Ok(())
+        } else {
+            Err(format!("invalid root WDL with q={} d={}", self.root_q, self.root_d).into())
+        }
+    }
+
+    /// Loss, draw and win probabilities from the side to move.
+    pub fn root_wdl(&self) -> [f32; 3] {
+        let decisive = 1.0 - self.root_d;
+        let q = self.root_q.clamp(-decisive, decisive);
+        [(decisive - q) * 0.5, self.root_d, (decisive + q) * 0.5]
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -43,12 +61,12 @@ pub struct Row {
     pub position: Position,
     /// Final result from the side-to-move perspective.
     pub value: i8,
-    /// Shard generation wall time divided by its position count, absent in v1.
-    pub generation_ns_per_position: Option<u64>,
+    /// Shard generation wall time divided by its position count.
+    pub generation_ns_per_position: u64,
 }
 
-fn schema(has_timing: bool, has_root_q: bool, has_root_d: bool) -> SchemaRef {
-    let mut fields = vec![
+fn schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
         Field::new("game_id", DataType::UInt64, false),
         Field::new("ply", DataType::UInt16, false),
         Field::new("board", DataType::FixedSizeBinary(32), false),
@@ -60,17 +78,10 @@ fn schema(has_timing: bool, has_root_q: bool, has_root_d: bool) -> SchemaRef {
         Field::new("policy_visits", DataType::Binary, false),
         Field::new("played_move", DataType::UInt16, false),
         Field::new("value", DataType::Int8, false),
-    ];
-    if has_timing {
-        fields.push(Field::new(GENERATION_TIME_COLUMN, DataType::UInt64, false));
-    }
-    if has_root_q {
-        fields.push(Field::new("root_q", DataType::Float32, false));
-    }
-    if has_root_d {
-        fields.push(Field::new("root_d", DataType::Float32, false));
-    }
-    Arc::new(Schema::new(fields))
+        Field::new("generation_ns_per_position", DataType::UInt64, false),
+        Field::new("root_q", DataType::Float32, false),
+        Field::new("root_d", DataType::Float32, false),
+    ]))
 }
 
 #[cfg(test)]
@@ -91,8 +102,8 @@ mod tests {
             },
             policy: vec![(0x10ff, 15), (0x0402, 1), (0x0003, 0)],
             played_move: 0x10ff,
-            root_q: Some(-0.375),
-            root_d: Some(0.5),
+            root_q: -0.375,
+            root_d: 0.5,
         });
 
         write_shard(dir.path(), 0, [(123, positions.as_slice(), 1)], 1234)?;
@@ -107,7 +118,7 @@ mod tests {
             assert_eq!(row.game_id, 123);
             assert_eq!(row.value, if position.ply % 2 == 0 { 1 } else { -1 });
             assert_eq!(row.position, position);
-            assert_eq!(row.generation_ns_per_position, Some(1234));
+            assert_eq!(row.generation_ns_per_position, 1234);
         }
         Ok(())
     }
