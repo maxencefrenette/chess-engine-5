@@ -13,7 +13,6 @@ use rand_chacha::ChaCha8Rng;
 use chess_network::{INPUTS, SQUARES, encode_position, policy_inputs::PolicyInputs};
 
 pub struct Row {
-    can_reflect: bool,
     game: u64,
     black: bool,
     material: chess_network::hints::MaterialKey,
@@ -177,7 +176,6 @@ fn encode_row(row: &chess_data::Row, moves: Vec<(u16, f32)>, use_value: bool) ->
     )
     .ok_or("invalid piece code")?;
     Ok(Row {
-        can_reflect: snapshot.castling == 0,
         game: row.game_id,
         black: black_to_move,
         material: chess_network::hints::material_key(board, black_to_move),
@@ -215,40 +213,6 @@ pub fn attach_hints(
     table
 }
 
-// The low three bits of each packed square encode its file.
-const REFLECT_MOVE: u16 = 7 | (7 << 6);
-
-fn append_reflected(positions: &mut Vec<f32>, features: &[f32]) {
-    for rank in features.chunks_exact(8 * INPUTS) {
-        for square in rank.chunks_exact(INPUTS).rev() {
-            positions.extend_from_slice(square);
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct Example {
-    pub row: usize,
-    reflected: bool,
-}
-
-pub(crate) fn examples(rows: &[Row], both_views: bool) -> Vec<Example> {
-    let mut examples = Vec::with_capacity(rows.len());
-    for (index, row) in rows.iter().enumerate() {
-        examples.push(Example {
-            row: index,
-            reflected: false,
-        });
-        if both_views && row.can_reflect {
-            examples.push(Example {
-                row: index,
-                reflected: true,
-            });
-        }
-    }
-    examples
-}
-
 pub struct Batch {
     pub inputs: PolicyInputs,
     pub mask: Tensor,
@@ -261,41 +225,25 @@ pub struct Batch {
 }
 
 impl Batch {
-    pub fn new(
-        rows: &[Row],
-        indices: &[Example],
+    pub fn new<'a>(
+        rows: impl ExactSizeIterator<Item = &'a Row> + Clone,
         device: &Device,
-        reflection_rate: f64,
         hint_dropout: f64,
         rng: &mut impl Rng,
     ) -> candle_core::Result<Self> {
-        let size = indices.len();
+        let size = rows.len();
         let mut positions = Vec::with_capacity(size * SQUARES * INPUTS);
-        let mut masks = Vec::with_capacity(size);
-        for example in indices {
-            let row = &rows[example.row];
-            if example.reflected
-                || (row.can_reflect && reflection_rate > 0. && rng.random_bool(reflection_rate))
-            {
-                append_reflected(&mut positions, &row.features);
-                masks.push(REFLECT_MOVE);
-            } else {
-                positions.extend_from_slice(&row.features);
-                masks.push(0);
-            }
+        for row in rows.clone() {
+            positions.extend_from_slice(&row.features);
         }
-        let moves = indices
-            .iter()
-            .zip(&masks)
-            .map(|(&i, &mask)| rows[i.row].moves.iter().map(move |&(mv, _)| mv ^ mask));
+        let moves = rows.clone().map(|row| row.moves.iter().map(|&(mv, _)| mv));
         let inputs = PolicyInputs::new(positions, moves, device)?.with_hints(
-            indices
-                .iter()
-                .map(|&i| {
+            rows.clone()
+                .map(|row| {
                     if hint_dropout > 0. && rng.random_bool(hint_dropout) {
                         [0.; chess_network::hints::FEATURES]
                     } else {
-                        rows[i.row].hint
+                        row.hint
                     }
                 })
                 .collect(),
@@ -306,8 +254,7 @@ impl Batch {
         let mut value = Vec::with_capacity(size);
         let mut value_indices = Vec::new();
         let mut uniform_loss = 0.;
-        for (i, &row) in indices.iter().enumerate() {
-            let row = &rows[row.row];
+        for (i, row) in rows.clone().enumerate() {
             if row.use_value {
                 value.extend_from_slice(&row.value);
                 value_indices.push(i as u32);
@@ -333,13 +280,7 @@ impl Batch {
             } else {
                 None
             },
-            reply: crate::reply::Targets::batch(
-                indices
-                    .iter()
-                    .zip(&masks)
-                    .map(|(e, &mask)| (rows[e.row].reply.as_ref(), mask)),
-                device,
-            )?,
+            reply: crate::reply::Targets::batch(rows.map(|row| row.reply.as_ref()), device)?,
             value_count,
             uniform_loss,
         })
@@ -398,69 +339,9 @@ mod tests {
     }
 
     #[test]
-    fn both_views_adds_one_copy_only_after_all_castling_rights_are_lost() -> Result<()> {
-        let rows = [0, 1, 8, 15]
-            .map(|castling| {
-                let row = chess_data::Row {
-                    game_id: 0,
-                    value: 0,
-                    generation_ns_per_position: 0,
-                    position: chess_data::Position {
-                        ply: 1,
-                        snapshot: chess_data::Board {
-                            board: [0; 32],
-                            castling,
-                            ep_square: 64,
-                            halfmove_clock: 0,
-                            repetitions: 1,
-                        },
-                        root_q: 0.,
-                        root_d: 0.5,
-                        played_move: 0,
-                        policy: vec![(0, 10)],
-                    },
-                };
-                encode_row(&row, crate::rescoring::search_policy(&row), true)
-            })
-            .into_iter()
-            .collect::<Result<Vec<_>>>()?;
-        let views: Vec<_> = examples(&rows, true)
-            .iter()
-            .map(|e| (e.row, e.reflected))
-            .collect();
-        assert_eq!(
-            views,
-            [(0, false), (0, true), (1, false), (2, false), (3, false)]
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn file_reflection_preserves_promotion_and_moves_en_passant() {
-        // a7xb8=N becomes h7xg8=N.
-        assert_eq!(
-            (48 | (57 << 6) | (1 << 12)) ^ REFLECT_MOVE,
-            55 | (62 << 6) | (1 << 12)
-        );
-        let mut board = [0; 32];
-        board[24] = 1; // a7 pawn
-        let mut mirrored_board = [0; 32];
-        mirrored_board[27] = 1 << 4; // h7 pawn
-        let encode = |board, ep| {
-            let mut tokens = Vec::new();
-            encode_position(&mut tokens, board, true, 0, ep, 17, 2).unwrap();
-            tokens
-        };
-        let mut result = Vec::new();
-        append_reflected(&mut result, &encode(&board, 20));
-        assert_eq!(result, encode(&mirrored_board, 19));
-    }
-
-    #[test]
     fn hints_use_selected_training_games_only() {
         use chess_network::hints::HintConfig;
         let row = |game, material, outcome| Row {
-            can_reflect: true,
             game,
             material,
             outcome,

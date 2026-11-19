@@ -40,13 +40,14 @@ pub struct Targets {
 
 impl Targets {
     pub fn batch<'a>(
-        rows: impl ExactSizeIterator<Item = (Option<&'a Reply>, u16)> + Clone,
+        rows: impl ExactSizeIterator<Item = Option<&'a Reply>> + Clone,
         device: &Device,
     ) -> Result<Option<Self>> {
         let size = rows.len();
         let width = rows
             .clone()
-            .filter_map(|(r, _)| r.map(|r| r.moves.len()))
+            .flatten()
+            .map(|r| r.moves.len())
             .max()
             .unwrap_or(0);
         if width == 0 {
@@ -61,17 +62,17 @@ impl Targets {
         let mut distribution = promotes.clone();
         let mut mask = vec![-1e9f32; size * width];
         let mut count = 0;
-        for (i, (reply, flip)) in rows.enumerate() {
+        for (i, reply) in rows.enumerate() {
             let Some(reply) = reply else { continue };
             count += 1;
-            let played = reply.played ^ flip;
+            let played = reply.played;
             from[i] = (i * 64 + usize::from(played & 63)) as u32;
             to[i] = (i * 64 + usize::from((played >> 6) & 63)) as u32;
             promo[i * 5 + usize::from(played >> 12)] = 1.;
             let total: f32 = reply.moves.iter().map(|m| f32::from(m.1)).sum();
             for (j, &(mv, visits)) in reply.moves.iter().enumerate() {
                 let k = i * width + j;
-                (moves[k], offsets[k], promotes[k]) = chess_network::move_indices(mv ^ flip);
+                (moves[k], offsets[k], promotes[k]) = chess_network::move_indices(mv);
                 mask[k] = 0.;
                 distribution[k] = f32::from(visits) / total;
             }
@@ -149,7 +150,7 @@ mod tests {
             played: 12 | (28 << 6),
             moves: vec![(52 | (36 << 6), 9), (51 | (35 << 6), 1)],
         };
-        let batch = Targets::batch([(Some(&reply), 0), (None, 0)].into_iter(), device)?.unwrap();
+        let batch = Targets::batch([Some(&reply), None].into_iter(), device)?.unwrap();
         let features = Var::randn(0f32, 1., (2, 64, 8), device)?;
         let grads = head.loss(&features, &batch)?.backward()?;
         let grad = grads.get(&features).unwrap();

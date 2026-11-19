@@ -13,7 +13,6 @@ pub struct Config {
     pub(crate) batch_size: NonZeroUsize,
     pub(crate) optimizer: OptimizerConfig,
     pub(crate) weight_averaging: WeightAveraging,
-    pub(crate) reflection: Reflection,
     #[range(min = 0.0)]
     pub(crate) reply_weight: f64,
     pub(crate) seed: u64,
@@ -26,18 +25,6 @@ pub struct Config {
     pub(crate) value_rescoring: RescoringConfig,
     pub(crate) curriculum: Vec<CurriculumStep>,
     pub(crate) model: ModelConfig,
-}
-
-#[chess_config::toml_config]
-#[derive(serde::Serialize)]
-#[serde(tag = "mode", rename_all = "snake_case")]
-pub(crate) enum Reflection {
-    Disabled {},
-    Random {
-        #[range(min = 0.0, max = 1.0)]
-        rate: f64,
-    },
-    Both {},
 }
 
 #[chess_config::toml_config]

@@ -89,21 +89,12 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         rescorer.stats.probed, rescorer.stats.changed
     );
     let hints = data::attach_hints(&mut datasets, model.hints);
-    let both = matches!(config.reflection, crate::config::Reflection::Both {});
-    let random_rate = match config.reflection {
-        crate::config::Reflection::Random { rate } => rate,
-        _ => 0.,
-    };
-    let phase_examples: Vec<_> = datasets
-        .iter()
-        .map(|data| data::examples(&data.train, both))
-        .collect();
     let phase_steps = curriculum
         .iter()
-        .zip(&phase_examples)
+        .zip(&datasets)
         .enumerate()
         .map(|(index, (step, data))| {
-            step.optimizer_steps(data.len(), batch_size)
+            step.optimizer_steps(data.train.len(), batch_size)
                 .map_err(|error| format!("curriculum phase {}: {error}", index + 1).into())
         })
         .collect::<Result<Vec<_>>>()?;
@@ -173,8 +164,8 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     let mut partial_epoch_positions = 0;
     for (index, (data, phase_steps)) in datasets.iter().zip(phase_steps).enumerate() {
         let rows = &data.train;
-        let mut indices = phase_examples[index].clone();
-        let steps_per_epoch = indices.len().div_ceil(batch_size);
+        let mut indices: Vec<_> = (0..rows.len()).collect();
+        let steps_per_epoch = rows.len().div_ceil(batch_size);
         let end_step = optimizer_steps + phase_steps;
         let phase_start = positions_seen;
         for _ in 0..phase_steps.div_ceil(steps_per_epoch) {
@@ -186,10 +177,8 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
             let mut epoch_values = 0;
             for chunk in indices.chunks(batch_size).take(end_step - optimizer_steps) {
                 let batch = Batch::new(
-                    rows,
-                    chunk,
+                    chunk.iter().map(|&i| &rows[i]),
                     device,
-                    random_rate,
                     model.hints.dropout(),
                     &mut hint_rng,
                 )?;
@@ -251,7 +240,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
             }
             println!(
                 "epoch {epoch}: {epoch_positions}/{} positions; train policy {policy:.4}, WDL {value:.4}, {:.1}s",
-                indices.len(),
+                rows.len(),
                 epoch_started.elapsed().as_secs_f64()
             );
         }
@@ -261,10 +250,9 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         phase_metrics.push(json!({
             "phase": index + 1,
             "positions": rows.len(),
-            "examples_per_epoch": indices.len(),
             "optimizer_steps": phase_steps,
             "positions_seen": positions_seen - phase_start,
-            "epochs": (positions_seen - phase_start) as f64 / indices.len() as f64,
+            "epochs": (positions_seen - phase_start) as f64 / rows.len() as f64,
         }));
     }
     device.synchronize()?;
@@ -294,16 +282,15 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     let count_sum = counts.iter().sum::<f64>();
     let mut totals = [0.; 3];
     let mut value_baseline = 0.;
-    let indices = data::examples(&held_out.test, false);
-    for chunk in indices.chunks(batch_size) {
-        let batch = Batch::new(&held_out.test, chunk, device, 0., 0., &mut hint_rng)?;
+    for chunk in held_out.test.chunks(batch_size) {
+        let batch = Batch::new(chunk.iter(), device, 0., &mut hint_rng)?;
         let losses = losses(batch.inputs.logits(&net)?, &batch)?;
         for (total, loss) in totals.iter_mut().zip(losses) {
             *total += f64::from(loss.to_scalar::<f32>()?) * chunk.len() as f64;
         }
         totals[2] += batch.uniform_loss;
-        for &row in chunk {
-            for (count, probability) in counts.iter().zip(held_out.test[row.row].value) {
+        for row in chunk {
+            for (count, probability) in counts.iter().zip(row.value) {
                 value_baseline -= f64::from(probability) * (count / count_sum).ln();
             }
         }
@@ -323,7 +310,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
 
     println!(
         "epochs: {completed_epochs} complete, {partial_epoch_positions}/{} positions in a partial epoch",
-        phase_examples.last().unwrap().len()
+        held_out.train.len()
     );
 
     let metrics = json!({
