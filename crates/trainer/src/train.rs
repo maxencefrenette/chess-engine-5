@@ -295,18 +295,11 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     let mut totals = [0.; 3];
     let mut value_baseline = 0.;
     let indices = data::examples(&held_out.test, false);
-    let (eligible, other): (Vec<_>, Vec<_>) = indices
-        .into_iter()
-        .partition(|&i| held_out.test[i.row].can_reflect);
-    let mut eligible_losses = [0.; 2];
-    for chunk in eligible.chunks(batch_size).chain(other.chunks(batch_size)) {
+    for chunk in indices.chunks(batch_size) {
         let batch = Batch::new(&held_out.test, chunk, device, 0., 0., &mut hint_rng)?;
         let losses = losses(batch.inputs.logits(&net)?, &batch)?;
         for (total, loss) in totals.iter_mut().zip(losses) {
             *total += f64::from(loss.to_scalar::<f32>()?) * chunk.len() as f64;
-        }
-        if held_out.test[chunk[0].row].can_reflect {
-            eligible_losses.copy_from_slice(&totals[..2]);
         }
         totals[2] += batch.uniform_loss;
         for &row in chunk {
@@ -314,13 +307,6 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
                 value_baseline -= f64::from(probability) * (count / count_sum).ln();
             }
         }
-    }
-    if !eligible.is_empty() {
-        let [policy, wdl] = eligible_losses.map(|loss| loss / eligible.len() as f64);
-        println!(
-            "held-out without castling rights: {} positions, policy {policy:.6}, WDL {wdl:.6}",
-            eligible.len()
-        );
     }
     let test_count = held_out.test.len() as f64;
     let [policy, value, uniform] = totals.map(|loss| loss / test_count);

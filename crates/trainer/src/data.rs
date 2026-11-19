@@ -13,7 +13,7 @@ use rand_chacha::ChaCha8Rng;
 use chess_network::{INPUTS, SQUARES, encode_position, policy_inputs::PolicyInputs};
 
 pub struct Row {
-    pub can_reflect: bool,
+    can_reflect: bool,
     game: u64,
     black: bool,
     material: chess_network::hints::MaterialKey,
