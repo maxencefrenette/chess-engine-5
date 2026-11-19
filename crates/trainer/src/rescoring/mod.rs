@@ -50,12 +50,7 @@ pub struct Rescorer {
 impl Rescorer {
     /// Blend the search policy with uniform probability over selected DTZ moves.
     pub fn policy(&mut self, row: &Row) -> io::Result<Vec<(u16, f32)>> {
-        let mut policy: Vec<_> = row
-            .position
-            .policy
-            .iter()
-            .map(|&(m, n)| (m, f32::from(n)))
-            .collect();
+        let mut policy = search_policy(row);
         let board = &row.position.snapshot;
         if self.policy_mix == 0.
             || board.castling != 0
@@ -126,6 +121,14 @@ impl Rescorer {
         row.value = value;
         Ok(())
     }
+}
+
+pub fn search_policy(row: &Row) -> Vec<(u16, f32)> {
+    row.position
+        .policy
+        .iter()
+        .map(|&(mv, visits)| (mv, f32::from(visits)))
+        .collect()
 }
 
 pub fn game_value(value: i8) -> [f32; 3] {

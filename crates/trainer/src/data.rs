@@ -142,11 +142,9 @@ pub fn load(
                     })
                 };
                 let policy = rescorer.policy(&row)?;
-                let mut encoded = encode_row(row, use_value)?;
+                let mut encoded = encode_row(&row, policy, use_value)?;
                 encoded.outcome = outcome;
-                encoded.total_visits = policy.iter().map(|(_, p)| p).sum();
                 encoded.reply = reply;
-                encoded.moves = policy;
                 encoded.value = value;
                 Ok(encoded)
             })
@@ -154,7 +152,7 @@ pub fn load(
         test: test
             .into_iter()
             .filter(|_| retain_holdout)
-            .map(|row| encode_row(row, true))
+            .map(|row| encode_row(&row, crate::rescoring::search_policy(&row), true))
             .collect::<Result<_>>()?,
         train_games: by_game.len(),
         value_labels_per_game,
@@ -163,8 +161,8 @@ pub fn load(
     })
 }
 
-fn encode_row(row: chess_data::Row, use_value: bool) -> Result<Row> {
-    let snapshot = row.position.snapshot;
+fn encode_row(row: &chess_data::Row, moves: Vec<(u16, f32)>, use_value: bool) -> Result<Row> {
+    let snapshot = &row.position.snapshot;
     let board = &snapshot.board;
     let black_to_move = !row.position.ply.is_multiple_of(2);
     let mut features = Vec::with_capacity(SQUARES * INPUTS);
@@ -187,18 +185,8 @@ fn encode_row(row: chess_data::Row, use_value: bool) -> Result<Row> {
         hint: [0.; chess_network::hints::FEATURES],
         features,
         reply: None,
-        total_visits: row
-            .position
-            .policy
-            .iter()
-            .map(|&(_, visits)| f32::from(visits))
-            .sum(),
-        moves: row
-            .position
-            .policy
-            .into_iter()
-            .map(|(m, n)| (m, f32::from(n)))
-            .collect(),
+        total_visits: moves.iter().map(|(_, visits)| visits).sum(),
+        moves,
         value: crate::rescoring::game_value(row.value),
         use_value,
     })
@@ -413,28 +401,26 @@ mod tests {
     fn both_views_adds_one_copy_only_after_all_castling_rights_are_lost() -> Result<()> {
         let rows = [0, 1, 8, 15]
             .map(|castling| {
-                encode_row(
-                    chess_data::Row {
-                        game_id: 0,
-                        value: 0,
-                        generation_ns_per_position: 0,
-                        position: chess_data::Position {
-                            ply: 1,
-                            snapshot: chess_data::Board {
-                                board: [0; 32],
-                                castling,
-                                ep_square: 64,
-                                halfmove_clock: 0,
-                                repetitions: 1,
-                            },
-                            root_q: 0.,
-                            root_d: 0.5,
-                            played_move: 0,
-                            policy: vec![(0, 10)],
+                let row = chess_data::Row {
+                    game_id: 0,
+                    value: 0,
+                    generation_ns_per_position: 0,
+                    position: chess_data::Position {
+                        ply: 1,
+                        snapshot: chess_data::Board {
+                            board: [0; 32],
+                            castling,
+                            ep_square: 64,
+                            halfmove_clock: 0,
+                            repetitions: 1,
                         },
+                        root_q: 0.,
+                        root_d: 0.5,
+                        played_move: 0,
+                        policy: vec![(0, 10)],
                     },
-                    true,
-                )
+                };
+                encode_row(&row, crate::rescoring::search_policy(&row), true)
             })
             .into_iter()
             .collect::<Result<Vec<_>>>()?;
