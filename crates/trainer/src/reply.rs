@@ -8,7 +8,10 @@ pub struct Reply {
     moves: Vec<(u16, u16)>,
 }
 
-pub fn targets(selected: &[chess_data::Row]) -> Vec<Option<Reply>> {
+pub fn targets(
+    selected: &[chess_data::Row],
+    perspective: chess_network::perspective::Perspective,
+) -> Vec<Option<Reply>> {
     // Use only selected rows, so every policy we train on incurred its generation charge.
     let lookup: HashMap<_, _> = selected
         .iter()
@@ -18,9 +21,15 @@ pub fn targets(selected: &[chess_data::Row]) -> Vec<Option<Reply>> {
         .iter()
         .map(|r| {
             let next = r.position.ply.checked_add(1)?;
+            // Both labels are expressed in the parent board's frame.
+            let mask = perspective.move_mask(!r.position.ply.is_multiple_of(2));
             Some(Reply {
-                played: r.position.played_move,
-                moves: (*lookup.get(&(r.game_id, next))?).clone(),
+                played: r.position.played_move ^ mask,
+                moves: lookup
+                    .get(&(r.game_id, next))?
+                    .iter()
+                    .map(|&(mv, visits)| (mv ^ mask, visits))
+                    .collect(),
             })
         })
         .collect()
@@ -139,6 +148,39 @@ mod tests {
     use super::*;
     use candle_core::{DType, Var};
     use candle_nn::VarMap;
+    #[test]
+    fn reply_targets_use_the_parent_frame_for_both_plies() {
+        let rows: Vec<_> = (0..3)
+            .map(|ply| chess_data::Row {
+                game_id: 0,
+                value: 0,
+                generation_ns_per_position: 1,
+                position: chess_data::Position {
+                    ply,
+                    snapshot: chess_data::Board {
+                        board: [0; 32],
+                        castling: 0,
+                        ep_square: 64,
+                        halfmove_clock: 0,
+                        repetitions: 1,
+                    },
+                    played_move: [12 | 28 << 6, 52 | 36 << 6, 6 | 21 << 6][ply as usize],
+                    policy: vec![(6 | 21 << 6, 800)],
+                    root_q: 0.,
+                    root_d: 1.,
+                },
+            })
+            .collect();
+        let replies = targets(&rows, chess_network::perspective::Perspective::SideToMove);
+        let white = replies[0].as_ref().unwrap();
+        let black = replies[1].as_ref().unwrap();
+        assert_eq!(white.played, 12 | 28 << 6);
+        assert_eq!(white.moves, [(6 | 21 << 6, 800)]);
+        assert_eq!(black.played, 12 | 28 << 6);
+        assert_eq!(black.moves, [(62 | 45 << 6, 800)]);
+        assert!(replies[2].is_none());
+    }
+
     #[test]
     fn replies_train_the_parent_features_and_ignore_missing_rows() -> Result<()> {
         let device = &Device::Cpu;

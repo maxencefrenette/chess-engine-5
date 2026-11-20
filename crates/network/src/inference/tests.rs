@@ -21,7 +21,7 @@ fn cuda_replays_match_eager_with_changing_inputs() -> Result<(), Box<dyn std::er
         env!("CARGO_MANIFEST_DIR"),
         "/../../config/eval-model.toml"
     ))?)?;
-    let model = InferenceModel::load(
+    let mut model = InferenceModel::load(
         Path::new(config["baseline_dir"].as_str().unwrap()),
         DeviceConfig::Cuda,
     )?;
@@ -29,6 +29,11 @@ fn cuda_replays_match_eager_with_changing_inputs() -> Result<(), Box<dyn std::er
         .into_iter()
         .enumerate()
     {
+        model.net.config.perspective = if iteration % 2 == 0 {
+            crate::perspective::Perspective::SideToMove
+        } else {
+            crate::perspective::Perspective::Absolute
+        };
         let width = [19usize, 65, 9][iteration % 3];
         let moves: Vec<Vec<u16>> = (0..size)
             .map(|i| {
@@ -43,17 +48,26 @@ fn cuda_replays_match_eager_with_changing_inputs() -> Result<(), Box<dyn std::er
         )?;
         let mut features = Vec::new();
         let mut hints = Vec::new();
-        for i in 0..size {
-            let (b, black) = board(i + iteration);
+        let mut network_moves = moves.clone();
+        for (i, row) in network_moves.iter_mut().enumerate() {
+            let (mut b, mut black) = board(i + iteration);
             hints.push(model.hints.lookup(
                 &crate::hints::material_key(&b.board, black),
                 model.net.config.hints,
             ));
+            let mask = model.net.config.perspective.move_mask(black);
+            if mask != 0 {
+                b = crate::perspective::flip_board(&b);
+                black = false;
+                for mv in row {
+                    *mv ^= mask;
+                }
+            }
             encode_position(&mut features, &b, black).unwrap();
         }
         let unpadded = PolicyInputs::new(
             features,
-            moves.iter().map(|r| r.iter().copied()),
+            network_moves.iter().map(|r| r.iter().copied()),
             &model.device,
         )?
         .with_hints(hints)?;
@@ -110,6 +124,7 @@ fn material_hints_survive_cuda_graph_replay() -> Result<(), Box<dyn std::error::
         DeviceConfig::Cuda,
     )?;
     let mut config = baseline.net.config;
+    config.perspective = crate::perspective::Perspective::Absolute;
     config.hints = HintConfig::Material {
         min_games: 20.try_into()?,
         injection: crate::hints::Injection::EarlyAndValue,

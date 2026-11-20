@@ -10,8 +10,8 @@ value_loss_weight = 0.6
 value_rescoring = { mode = "disabled" }
 
 [[curriculum]]
-dataset = "/data/chess/chess-engine-5/models/day-2026.11.19/datagen-visits/visits-800-data/v4/1795158978137675233-1787082"
-num_positions = 370100
+dataset = "/data/chess/chess-engine-5/models/day-2026.11.20/self-play-refresh/fresh-data/v4/1795208513662943708-2112136"
+num_positions = 379600
 epochs = 15.0
 
 [optimizer]
@@ -24,6 +24,7 @@ weight_decay = 0.01
 schedule = { mode = "cosine", warmup_fraction = 0.05, min_ratio = 0.1 }
 
 [model]
+perspective = "side_to_move"
 hints = { mode = "disabled" }
 inference_precision = "bf16"
 width = 64

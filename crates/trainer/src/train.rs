@@ -1,7 +1,7 @@
 use std::{fmt::Write, fs, time::Instant};
 
 use candle_core::{DType, Device, Tensor};
-use candle_nn::{AdamW, Optimizer, VarBuilder, VarMap, ops::log_softmax};
+use candle_nn::{VarBuilder, VarMap, ops::log_softmax};
 use chess_network::{Net, checkpoint};
 use rand::{SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha8Rng;
@@ -167,7 +167,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
             )
         })
         .transpose()?;
-    let mut optimizer = AdamW::new(parameters.all_vars(), adamw.into())?;
+    let mut optimizer = crate::packed_adamw::PackedAdamW::new(parameters.all_vars(), adamw.into())?;
     let mut average =
         crate::weight_averaging::TailAverage::new(&config.weight_averaging, planned_steps);
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
@@ -211,8 +211,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
                 }
                 let lr =
                     adamw.learning_rate * adamw.schedule.multiplier(optimizer_steps, planned_steps);
-                optimizer.set_learning_rate(lr);
-                optimizer.backward_step(&objective)?;
+                optimizer.step(&objective.backward()?, lr)?;
                 optimizer_steps += 1;
                 average.update(&parameters, optimizer_steps)?;
                 positions_seen += chunk.len();
@@ -384,7 +383,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use candle_nn::SGD;
+    use candle_nn::{Optimizer, SGD};
     use chess_config::TomlConfig;
     use chess_network::{INPUTS, SQUARES};
 

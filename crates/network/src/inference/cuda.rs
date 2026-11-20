@@ -48,7 +48,11 @@ impl Inference {
             .next_power_of_two();
         let mut boards = vec![0u8; batch * PACKED];
         let mut hints = Vec::with_capacity(batch * crate::hints::FEATURES);
-        for (i, (board, black)) in positions.enumerate() {
+        let mut indices = vec![0u32; batch * width];
+        let mut promotions = indices.clone();
+        let mut promotes = vec![0f32; batch * width];
+        for (i, ((board, black), moves)) in positions.zip(moves).enumerate() {
+            let (board, black, mask) = net.config.perspective.orient(board, black);
             hints.extend_from_slice(&table.lookup(
                 &crate::hints::material_key(&board.board, black),
                 net.config.hints,
@@ -65,17 +69,12 @@ impl Inference {
                 board.halfmove_clock,
                 board.repetitions,
             ]);
-        }
-        let mut indices = vec![0u32; batch * width];
-        let mut promotions = indices.clone();
-        let mut promotes = vec![0f32; batch * width];
-        for (i, row) in moves.enumerate() {
-            for (j, mv) in row.enumerate() {
+            for (j, mv) in moves.enumerate() {
                 (
                     indices[i * width + j],
                     promotions[i * width + j],
                     promotes[i * width + j],
-                ) = move_indices(mv);
+                ) = move_indices(mv ^ mask);
             }
         }
         // Padding the batch dimension changes BF16 GEMM results. Capture common

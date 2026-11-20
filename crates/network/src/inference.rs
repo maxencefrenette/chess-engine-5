@@ -80,7 +80,10 @@ impl InferenceModel {
         }
         let mut features = Vec::with_capacity(size * SQUARES * INPUTS);
         let mut hints = Vec::with_capacity(size);
+        let mut masks = Vec::with_capacity(size);
         for (snapshot, black) in positions {
+            let (snapshot, black, mask) = self.net.config.perspective.orient(snapshot, black);
+            masks.push(mask);
             hints.push(self.hints.lookup(
                 &crate::hints::material_key(&snapshot.board, black),
                 self.net.config.hints,
@@ -88,10 +91,17 @@ impl InferenceModel {
             encode_position(&mut features, &snapshot, black)
                 .ok_or_else(|| io::Error::other("invalid piece code"))?;
         }
-        let (policy, wdl) = PolicyInputs::new(features, moves.clone(), &self.device)
-            .and_then(|inputs| inputs.with_hints(hints))
-            .and_then(|inputs| inputs.logits(&self.net))
-            .map_err(io::Error::other)?;
+        let (policy, wdl) = PolicyInputs::new(
+            features,
+            moves
+                .clone()
+                .zip(masks.iter())
+                .map(|(row, &mask)| row.map(move |mv| mv ^ mask)),
+            &self.device,
+        )
+        .and_then(|inputs| inputs.with_hints(hints))
+        .and_then(|inputs| inputs.logits(&self.net))
+        .map_err(io::Error::other)?;
         let logits = policy
             .to_dtype(DType::F32)
             .and_then(|x| x.to_vec2::<f32>())

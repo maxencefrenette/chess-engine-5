@@ -1,6 +1,7 @@
 pub mod checkpoint;
 pub mod hints;
 pub mod inference;
+pub mod perspective;
 pub mod policy_inputs;
 pub mod value;
 
@@ -17,6 +18,7 @@ pub const INPUTS: usize = 21;
 #[chess_config::toml_config]
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct ModelConfig {
+    pub perspective: perspective::Perspective,
     pub inference_precision: InferencePrecision,
     pub width: usize,
     pub heads: usize,

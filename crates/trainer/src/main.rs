@@ -4,6 +4,7 @@ use chess_config::TomlConfig;
 
 mod config;
 mod data;
+mod packed_adamw;
 mod reply;
 mod rescoring;
 mod train;

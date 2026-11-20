@@ -1,4 +1,4 @@
-baseline_dir = "/data/chess/chess-engine-5/models/day-2026.11.19/datagen-visits/visits-800"
+baseline_dir = "/data/chess/chess-engine-5/models/day-2026.11.20/self-play-refresh/fresh"
 opening_book = "UHO_Lichess_4560_v1.epd"
 device = "cuda"
 batch = 128

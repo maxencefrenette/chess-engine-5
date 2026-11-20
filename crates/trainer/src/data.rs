@@ -115,7 +115,7 @@ pub fn load(
         / 1e9;
     let started = std::time::Instant::now();
     let replies = if config.reply_weight > 0. {
-        crate::reply::targets(&train)
+        crate::reply::targets(&train, config.model.perspective)
     } else {
         (0..train.len()).map(|_| None).collect()
     };
@@ -134,7 +134,14 @@ pub fn load(
                     crate::rescoring::game_value(row.value)
                 };
                 let policy = rescorer.policy(&row)?;
-                let mut encoded = encode_row(&row, policy, outcome_wdl, root_fraction, use_value)?;
+                let mut encoded = encode_row(
+                    row,
+                    policy,
+                    outcome_wdl,
+                    root_fraction,
+                    use_value,
+                    config.model.perspective,
+                )?;
                 encoded.reply = reply;
                 Ok(encoded)
             })
@@ -143,12 +150,15 @@ pub fn load(
             .into_iter()
             .filter(|_| retain_holdout)
             .map(|row| {
+                let policy = crate::rescoring::search_policy(&row);
+                let outcome = crate::rescoring::game_value(row.value);
                 encode_row(
-                    &row,
-                    crate::rescoring::search_policy(&row),
-                    crate::rescoring::game_value(row.value),
+                    row,
+                    policy,
+                    outcome,
                     root_fraction,
                     true,
+                    config.model.perspective,
                 )
             })
             .collect::<Result<_>>()?,
@@ -160,21 +170,27 @@ pub fn load(
 }
 
 fn encode_row(
-    row: &chess_data::Row,
-    moves: Vec<(u16, f32)>,
+    row: chess_data::Row,
+    mut moves: Vec<(u16, f32)>,
     outcome: [f32; 3],
     root_fraction: f32,
     use_value: bool,
+    perspective: chess_network::perspective::Perspective,
 ) -> Result<Row> {
     let root = row.position.root_wdl();
-    let snapshot = &row.position.snapshot;
     let black_to_move = !row.position.ply.is_multiple_of(2);
+    let (board, black, mask) = perspective.orient(row.position.snapshot, black_to_move);
     let mut features = Vec::with_capacity(SQUARES * INPUTS);
-    encode_position(&mut features, snapshot, black_to_move).ok_or("invalid piece code")?;
+    if mask != 0 {
+        for (mv, _) in &mut moves {
+            *mv ^= mask;
+        }
+    }
+    encode_position(&mut features, &board, black).ok_or("invalid piece code")?;
     Ok(Row {
         game: row.game_id,
         black: black_to_move,
-        material: chess_network::hints::material_key(&snapshot.board, black_to_move),
+        material: chess_network::hints::material_key(&board.board, black),
         outcome: row.value,
         hint: [0.; chess_network::hints::FEATURES],
         features,

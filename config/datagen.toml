@@ -1,4 +1,4 @@
-model = "/data/chess/chess-engine-5/models/day-2026.11.19/datagen-visits/visits-800"
+model = "/data/chess/chess-engine-5/models/day-2026.11.20/self-play-refresh/fresh"
 output_dir = "/data/chess/chess-engine-5/training-data"
 device = "cuda"
 total_games = 3250
