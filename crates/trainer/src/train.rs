@@ -25,6 +25,30 @@ struct TrainingSample {
     epoch: usize,
 }
 
+#[derive(Default)]
+struct LossTotals {
+    positions: usize,
+    values: usize,
+    policy_sum: f64,
+    wdl_sum: f64,
+}
+
+impl LossTotals {
+    fn add(&mut self, policy: f64, wdl: f64, positions: usize, values: usize) {
+        self.positions += positions;
+        self.values += values;
+        self.policy_sum += policy * positions as f64;
+        self.wdl_sum += wdl * values as f64;
+    }
+
+    fn means(&self) -> [f64; 2] {
+        [
+            self.policy_sum / self.positions as f64,
+            self.wdl_sum / self.values.max(1) as f64,
+        ]
+    }
+}
+
 fn soft_value_loss(logits: &Tensor, targets: &Tensor) -> candle_core::Result<Tensor> {
     (log_softmax(logits, 1)? * targets)?
         .sum(1)?
@@ -155,9 +179,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     let setup_seconds = training_started.duration_since(setup_started).as_secs_f64();
     let mut optimizer_steps = 0usize;
     let mut positions_seen = 0;
-    let mut window_positions = 0;
-    let mut window_values = 0;
-    let mut window_totals = [0.; 2];
+    let mut window_totals = LossTotals::default();
     let mut epoch = 0;
     let mut phase_metrics = Vec::with_capacity(curriculum.len());
     let mut completed_epochs = 0;
@@ -172,9 +194,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
             epoch += 1;
             let epoch_started = Instant::now();
             indices.shuffle(&mut rng);
-            let mut totals = [0.; 2];
-            let mut epoch_positions = 0;
-            let mut epoch_values = 0;
+            let mut totals = LossTotals::default();
             for chunk in indices.chunks(batch_size).take(end_step - optimizer_steps) {
                 let batch = Batch::new(
                     chunk.iter().map(|&i| &rows[i]),
@@ -195,28 +215,15 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
                 optimizer.backward_step(&objective)?;
                 optimizer_steps += 1;
                 average.update(&parameters, optimizer_steps)?;
-                epoch_positions += chunk.len();
                 positions_seen += chunk.len();
-                window_positions += chunk.len();
-                epoch_values += batch.value_count;
-                window_values += batch.value_count;
-                for (((total, window_total), loss), count) in totals
-                    .iter_mut()
-                    .zip(&mut window_totals)
-                    .zip([policy, value])
-                    .zip([chunk.len(), batch.value_count])
-                {
-                    let weighted = f64::from(loss.to_scalar::<f32>()?) * count as f64;
-                    *total += weighted;
-                    *window_total += weighted;
-                }
+                let policy = f64::from(policy.to_scalar::<f32>()?);
+                let wdl = f64::from(value.to_scalar::<f32>()?);
+                totals.add(policy, wdl, chunk.len(), batch.value_count);
+                window_totals.add(policy, wdl, chunk.len(), batch.value_count);
                 if optimizer_steps.is_multiple_of(METRICS_INTERVAL)
                     || optimizer_steps == planned_steps
                 {
-                    let [policy, wdl] = [
-                        window_totals[0] / window_positions as f64,
-                        window_totals[1] / window_values.max(1) as f64,
-                    ];
+                    let [policy, wdl] = window_totals.means();
                     history.push(TrainingSample {
                         policy,
                         wdl,
@@ -226,20 +233,16 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
                         positions: positions_seen,
                         epoch,
                     });
-                    window_totals = [0.; 2];
-                    window_positions = 0;
-                    window_values = 0;
+                    window_totals = LossTotals::default();
                 }
             }
-            let [policy, value] = [
-                totals[0] / epoch_positions as f64,
-                totals[1] / epoch_values.max(1) as f64,
-            ];
+            let [policy, value] = totals.means();
             if !policy.is_finite() || !value.is_finite() {
                 return Err("non-finite training loss".into());
             }
             println!(
-                "epoch {epoch}: {epoch_positions}/{} positions; train policy {policy:.4}, WDL {value:.4}, {:.1}s",
+                "epoch {epoch}: {}/{} positions; train policy {policy:.4}, WDL {value:.4}, {:.1}s",
+                totals.positions,
                 rows.len(),
                 epoch_started.elapsed().as_secs_f64()
             );

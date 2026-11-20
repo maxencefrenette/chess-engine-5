@@ -68,9 +68,8 @@ fn serializes_board_orientation_castling_and_en_passant() -> Result<()> {
 #[test]
 fn disabled_rescoring_keeps_data_untouched() -> Result<()> {
     let mut rescorer = RescoringConfig::Disabled.open()?;
-    let mut row = row(&[(0, 6), (9, 5), (63, 12)], false);
-    rescorer.rescore(&mut row)?;
-    assert_eq!(row.value, 0);
+    let row = row(&[(0, 6), (9, 5), (63, 12)], false);
+    assert_eq!(rescorer.value(&row, false)?, game_value(0));
     assert_eq!(rescorer.stats.probed, 0);
     Ok(())
 }
@@ -87,36 +86,31 @@ fn downloaded_tables_respect_side_clock_and_castling() -> Result<()> {
         ([(0, 12), (9, 11), (47, 6)], false, -1),
     ] {
         let mut row = row(&pieces, black);
-        rescorer.rescore(&mut row)?;
-        assert_eq!(row.value, expected);
-        assert_eq!(row.position.policy, [(123, 800)]);
-        assert_eq!(row.generation_ns_per_position, 42);
+        assert_eq!(rescorer.value(&row, false)?, game_value(expected));
         row.position.snapshot.halfmove_clock = 99;
-        rescorer.rescore(&mut row)?;
-        assert_eq!(row.value, 0, "not enough time to mate or reset the clock");
+        assert_eq!(
+            rescorer.value(&row, false)?,
+            game_value(0),
+            "not enough time to mate or reset the clock"
+        );
     }
     let mut kings = row(&[(0, 6), (63, 12)], false);
     kings.value = 1;
-    rescorer.rescore(&mut kings)?;
-    assert_eq!(kings.value, 0);
-    let mut five = row(&[(0, 6), (9, 5), (17, 5), (25, 5), (47, 12)], false);
-    rescorer.rescore(&mut five)?;
-    assert_eq!(five.value, 1);
-    let mut six = row(
+    assert_eq!(rescorer.value(&kings, false)?, game_value(0));
+    let five = row(&[(0, 6), (9, 5), (17, 5), (25, 5), (47, 12)], false);
+    assert_eq!(rescorer.value(&five, false)?, game_value(1));
+    let six = row(
         &[(0, 6), (9, 5), (17, 5), (25, 5), (33, 5), (47, 12)],
         false,
     );
     let probed = rescorer.stats.probed;
-    rescorer.rescore(&mut six)?;
-    assert_eq!(six.value, 0);
+    assert_eq!(rescorer.value(&six, false)?, game_value(0));
     assert_eq!(rescorer.stats.probed, probed);
     // ChessTB's published castling example: O-O-O+ wins a bishop.
     let mut castle = row(&[(0, 4), (4, 6), (6, 9), (43, 12)], false);
-    rescorer.rescore(&mut castle)?;
-    assert_eq!(castle.value, 0);
+    assert_eq!(rescorer.value(&castle, false)?, game_value(0));
     castle.position.snapshot.castling = 2;
-    rescorer.rescore(&mut castle)?;
-    assert_eq!(castle.value, 1);
+    assert_eq!(rescorer.value(&castle, false)?, game_value(1));
     Ok(())
 }
 
@@ -186,8 +180,7 @@ fn dtz_boost_prefers_mate_and_does_not_boost_losses() -> Result<()> {
     let mut losing = row(&[(0, 6), (9, 5), (47, 12)], true);
     losing.position.policy = (0..4096).map(|m| (m, 1)).collect();
     assert!(rescorer.policy(&losing)?.iter().all(|(_, p)| *p == 1.));
-    rescorer.rescore_with_history(&mut losing, true)?;
-    assert_eq!(losing.value, 0);
+    assert_eq!(rescorer.value(&losing, true)?, game_value(0));
     Ok(())
 }
 
@@ -217,10 +210,9 @@ fn soft_rescoring_respects_repetition_guard() -> Result<()> {
         value_mix: 0.25,
     }
     .open()?;
-    let mut winning = row(&[(0, 6), (9, 5), (47, 12)], false);
-    assert_eq!(rescorer.value(&mut winning, false)?, [0., 0.75, 0.25]);
-    let mut repeated = row(&[(0, 6), (9, 5), (47, 12)], false);
-    assert_eq!(rescorer.value(&mut repeated, true)?, [0., 1., 0.]);
+    let winning = row(&[(0, 6), (9, 5), (47, 12)], false);
+    assert_eq!(rescorer.value(&winning, false)?, [0., 0.75, 0.25]);
+    assert_eq!(rescorer.value(&winning, true)?, [0., 1., 0.]);
     Ok(())
 }
 

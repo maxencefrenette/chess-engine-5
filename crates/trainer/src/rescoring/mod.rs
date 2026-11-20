@@ -77,33 +77,20 @@ impl Rescorer {
     }
 
     /// Mix game outcomes and tablebase outcomes in loss/draw/win order.
-    pub fn value(&mut self, row: &mut Row, repeated: bool) -> io::Result<[f32; 3]> {
-        let original = row.value;
-        if self.value_mix > 0. {
-            self.rescore_with_history(row, repeated)?;
-        }
-        Ok(blend_value(original, row.value, self.value_mix))
-    }
-
-    pub fn rescore_with_history(&mut self, row: &mut Row, repeated: bool) -> io::Result<()> {
-        if repeated {
-            if self.tables.is_some() {
-                self.stats.history_skipped += 1;
-            }
-            return Ok(());
-        }
-        self.rescore(row)
-    }
-
-    /// Call only for selected training value labels; held-out labels stay intact.
-    pub fn rescore(&mut self, row: &mut Row) -> io::Result<()> {
+    pub fn value(&mut self, row: &Row, repeated: bool) -> io::Result<[f32; 3]> {
         let Some(tables) = &mut self.tables else {
-            return Ok(());
+            return Ok(game_value(row.value));
         };
+        if self.value_mix == 0. {
+            return Ok(game_value(row.value));
+        }
+        if repeated {
+            self.stats.history_skipped += 1;
+            return Ok(game_value(row.value));
+        }
         let board = &row.position.snapshot;
-        let pieces = (0..64).filter(|&square| piece(board, square) != 0).count();
-        if pieces > 5 {
-            return Ok(());
+        if (0..64).filter(|&square| piece(board, square) != 0).count() > 5 {
+            return Ok(game_value(row.value));
         }
         let fen = fen(board, !row.position.ply.is_multiple_of(2))?;
         let class = tables.wdl(&fen, board.ep_square, board.halfmove_clock)?;
@@ -118,8 +105,7 @@ impl Rescorer {
         self.stats.probed += 1;
         self.stats.changed += usize::from(value != row.value);
         self.stats.transitions[(row.value + 1) as usize][(value + 1) as usize] += 1;
-        row.value = value;
-        Ok(())
+        Ok(blend_value(row.value, value, self.value_mix))
     }
 }
 

@@ -126,17 +126,15 @@ pub fn load(
             .into_iter()
             .zip(mask)
             .zip(replies)
-            .map(|((mut row, use_value), reply)| {
-                let outcome = row.value;
+            .map(|((row, use_value), reply)| {
                 let outcome_wdl = if use_value && root_fraction < 1.0 {
                     let repeated = history.has_repeated(&row);
-                    rescorer.value(&mut row, repeated)?
+                    rescorer.value(&row, repeated)?
                 } else {
-                    crate::rescoring::game_value(outcome)
+                    crate::rescoring::game_value(row.value)
                 };
                 let policy = rescorer.policy(&row)?;
                 let mut encoded = encode_row(&row, policy, outcome_wdl, root_fraction, use_value)?;
-                encoded.outcome = outcome;
                 encoded.reply = reply;
                 Ok(encoded)
             })
