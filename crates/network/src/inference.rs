@@ -23,7 +23,6 @@ pub struct Prediction {
 
 pub struct InferenceModel {
     net: Net,
-    hints: crate::hints::MaterialTable,
     device: Device,
     #[cfg(feature = "cuda")]
     cuda: std::sync::Mutex<cuda::Inference>,
@@ -33,10 +32,8 @@ impl InferenceModel {
     pub fn load(model_dir: &Path, device: DeviceConfig) -> io::Result<Self> {
         let device = device.try_into().map_err(io::Error::other)?;
         let checkpoint = Checkpoint::load(model_dir, &device)?;
-        let hints = checkpoint.hints.clone();
         let net = checkpoint.into_model(&device).map_err(io::Error::other)?;
         Ok(Self {
-            hints,
             net,
             device,
             #[cfg(feature = "cuda")]
@@ -68,26 +65,15 @@ impl InferenceModel {
                 .cuda
                 .lock()
                 .map_err(|e| io::Error::other(e.to_string()))?
-                .evaluate(
-                    &self.net,
-                    &self.hints,
-                    positions,
-                    moves.clone(),
-                    &self.device,
-                )
+                .evaluate(&self.net, positions, moves.clone(), &self.device)
                 .map_err(io::Error::other)?;
             return predictions(moves, logits, values);
         }
         let mut features = Vec::with_capacity(size * SQUARES * INPUTS);
-        let mut hints = Vec::with_capacity(size);
         let mut masks = Vec::with_capacity(size);
         for (snapshot, black) in positions {
             let (snapshot, black, mask) = self.net.config.perspective.orient(snapshot, black);
             masks.push(mask);
-            hints.push(self.hints.lookup(
-                &crate::hints::material_key(&snapshot.board, black),
-                self.net.config.hints,
-            ));
             encode_position(&mut features, &snapshot, black)
                 .ok_or_else(|| io::Error::other("invalid piece code"))?;
         }
@@ -99,7 +85,6 @@ impl InferenceModel {
                 .map(|(row, &mask)| row.map(move |mv| mv ^ mask)),
             &self.device,
         )
-        .and_then(|inputs| inputs.with_hints(hints))
         .and_then(|inputs| inputs.logits(&self.net))
         .map_err(io::Error::other)?;
         let logits = policy

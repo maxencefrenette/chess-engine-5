@@ -1,5 +1,4 @@
 pub mod checkpoint;
-pub mod hints;
 pub mod inference;
 pub mod perspective;
 pub mod policy_inputs;
@@ -27,7 +26,6 @@ pub struct ModelConfig {
     pub policy_width: usize,
     pub smolgen: SmolgenConfig,
     pub value: ValueConfig,
-    pub hints: hints::HintConfig,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
@@ -228,8 +226,6 @@ pub struct Net {
     policy_key: Linear,
     promotion: Linear,
     value: ValueHead,
-    hints: Option<hints::HintEmbedding>,
-    value_hint_scale: Option<Tensor>,
 }
 
 impl Net {
@@ -260,22 +256,6 @@ impl Net {
             policy_query: linear(config.width, config.policy_width, vb.pp("policy_query"))?,
             policy_key: linear(config.width, config.policy_width, vb.pp("policy_key"))?,
             promotion: linear_no_bias(config.policy_width, 4, vb.pp("promotion"))?,
-            hints: match config.hints {
-                hints::HintConfig::Disabled {} => None,
-                hints::HintConfig::Material { .. } => {
-                    Some(hints::HintEmbedding::new(vb.pp("hints"), config.width)?)
-                }
-            },
-            value_hint_scale: match config.hints {
-                hints::HintConfig::Material {
-                    injection: hints::Injection::EarlyAndValue,
-                    ..
-                } => Some(
-                    vb.pp("hints")
-                        .get_with_hints((), "value_scale", Init::Const(1.))?,
-                ),
-                _ => None,
-            },
             value: ValueHead::new(vb, config)?,
         })
     }
@@ -287,19 +267,8 @@ impl Net {
         promotion_index: &Tensor,
         promotes: &Tensor,
     ) -> Result<(Tensor, Tensor)> {
-        self.forward_hinted(position, move_index, promotion_index, promotes, None)
-    }
-
-    pub fn forward_hinted(
-        &self,
-        position: &Tensor,
-        move_index: &Tensor,
-        promotion_index: &Tensor,
-        promotes: &Tensor,
-        hints: Option<&Tensor>,
-    ) -> Result<(Tensor, Tensor)> {
         let (policy, value, _) =
-            self.forward_with_features(position, move_index, promotion_index, promotes, hints)?;
+            self.forward_with_features(position, move_index, promotion_index, promotes)?;
         Ok((policy, value))
     }
 
@@ -309,33 +278,16 @@ impl Net {
         move_index: &Tensor,
         promotion_index: &Tensor,
         promotes: &Tensor,
-        hints: Option<&Tensor>,
     ) -> Result<(Tensor, Tensor, Tensor)> {
-        let hint = self
-            .hints
-            .as_ref()
-            .map(|embedding| {
-                embedding.forward(hints.ok_or_else(|| {
-                    candle_core::Error::Msg("material hint features required".into())
-                })?)
-            })
-            .transpose()?;
-        let encoded = self.encode(position, hint.as_ref())?;
+        let encoded = self.encode(position)?;
         let policy = self.legal_policy(&encoded, move_index, promotion_index, promotes)?;
-        let value_input = match (&hint, &self.value_hint_scale) {
-            (Some(hint), Some(scale)) => encoded.broadcast_add(&hint.broadcast_mul(scale)?)?,
-            _ => encoded.clone(),
-        };
-        let wdl = self.value.logits(&value_input)?;
+        let wdl = self.value.logits(&encoded)?;
         Ok((policy, wdl, encoded))
     }
 
-    fn encode(&self, position: &Tensor, hints: Option<&Tensor>) -> Result<Tensor> {
+    fn encode(&self, position: &Tensor) -> Result<Tensor> {
         let position = position.to_dtype(self.input.weight().dtype())?;
         let mut x = self.input.forward(&position)?.broadcast_add(&self.square)?;
-        if let Some(hint) = hints {
-            x = x.broadcast_add(hint)?;
-        }
         for layer in &self.layers {
             x = layer.forward(&x, self.smolgen_projection.as_ref(), self.config)?;
         }

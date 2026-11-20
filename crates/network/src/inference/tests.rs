@@ -47,14 +47,9 @@ fn cuda_replays_match_eager_with_changing_inputs() -> Result<(), Box<dyn std::er
             moves.iter().map(|r| r.iter().copied()),
         )?;
         let mut features = Vec::new();
-        let mut hints = Vec::new();
         let mut network_moves = moves.clone();
         for (i, row) in network_moves.iter_mut().enumerate() {
             let (mut b, mut black) = board(i + iteration);
-            hints.push(model.hints.lookup(
-                &crate::hints::material_key(&b.board, black),
-                model.net.config.hints,
-            ));
             let mask = model.net.config.perspective.move_mask(black);
             if mask != 0 {
                 b = crate::perspective::flip_board(&b);
@@ -69,8 +64,7 @@ fn cuda_replays_match_eager_with_changing_inputs() -> Result<(), Box<dyn std::er
             features,
             network_moves.iter().map(|r| r.iter().copied()),
             &model.device,
-        )?
-        .with_hints(hints)?;
+        )?;
         let (p, v) = unpadded.logits(&model.net)?;
         let unpadded = predictions(
             moves.iter().map(|r| r.iter().copied()),
@@ -107,93 +101,5 @@ fn cuda_replays_match_eager_with_changing_inputs() -> Result<(), Box<dyn std::er
             )?
             .is_empty()
     );
-    Ok(())
-}
-
-#[test]
-#[ignore = "requires CUDA and the baseline checkpoint"]
-fn material_hints_survive_cuda_graph_replay() -> Result<(), Box<dyn std::error::Error>> {
-    use crate::hints::{HintConfig, TableBuilder, material_key};
-    use candle_nn::{VarBuilder, VarMap};
-    let settings: toml::Value = toml::from_str(&std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../config/eval-model.toml"
-    ))?)?;
-    let baseline = InferenceModel::load(
-        Path::new(settings["baseline_dir"].as_str().unwrap()),
-        DeviceConfig::Cuda,
-    )?;
-    let mut config = baseline.net.config;
-    config.perspective = crate::perspective::Perspective::Absolute;
-    config.hints = HintConfig::Material {
-        min_games: 20.try_into()?,
-        injection: crate::hints::Injection::EarlyAndValue,
-        dropout: 0.,
-    };
-    let device = baseline.device;
-    let vars = VarMap::new();
-    let _ = Net::new(
-        VarBuilder::from_varmap(&vars, config.inference_precision.dtype(), &device),
-        config,
-    )?;
-    let tensors = vars
-        .data()
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|(name, var)| (name.clone(), var.as_tensor().detach()))
-        .collect();
-    let net = Net::new(
-        VarBuilder::from_tensors(tensors, config.inference_precision.dtype(), &device),
-        config,
-    )?;
-    let mut builder = TableBuilder::default();
-    let (b, black) = board(0);
-    for game in 0..20 {
-        builder.observe(0, game, material_key(&b.board, black), black, 1);
-    }
-    let model = InferenceModel {
-        net,
-        device,
-        hints: builder.finish(),
-        cuda: Default::default(),
-    };
-    for offset in [0, 1, 0] {
-        for size in [8, 3] {
-            let moves = vec![vec![0u16, 1, 2, 3]; size];
-            let actual = model.evaluate(
-                (0..size).map(|i| board(i + offset)),
-                moves.iter().map(|m| m.iter().copied()),
-            )?;
-            let mut features = Vec::new();
-            let mut hints = Vec::new();
-            for i in 0..size {
-                let (b, black) = board(i + offset);
-                hints.push(
-                    model
-                        .hints
-                        .lookup(&material_key(&b.board, black), config.hints),
-                );
-                encode_position(&mut features, &b, black).unwrap();
-            }
-            let inputs = PolicyInputs::new(
-                features,
-                moves.iter().map(|m| m.iter().copied()),
-                &model.device,
-            )?
-            .with_hints(hints)?;
-            let (p, v) = inputs.logits(&model.net)?;
-            let expected = predictions(
-                moves.iter().map(|m| m.iter().copied()),
-                p.to_dtype(DType::F32)?.to_vec2()?,
-                v.to_dtype(DType::F32)?.to_vec2()?,
-            )?;
-            for (actual, expected) in actual.iter().zip(expected) {
-                assert_eq!(actual.value, expected.value);
-                assert_eq!(actual.draw, expected.draw);
-                assert_eq!(actual.priors, expected.priors);
-            }
-        }
-    }
     Ok(())
 }
