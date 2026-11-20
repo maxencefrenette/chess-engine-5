@@ -1,12 +1,12 @@
-model = "/data/chess/chess-engine-5/models/root-wdl-2026.11.18/root-value-sampling-and-weight/weight-0.3-rate-0.5"
+model = "/data/chess/chess-engine-5/models/day-2026.11.19/datagen-visits/visits-800"
 output_dir = "/data/chess/chess-engine-5/training-data"
 device = "cuda"
-total_games = 2500
+total_games = 3250
 games_per_shard = 500
 batch = 128
 leaves_per_game = 4
-visits_per_move = 1000
+visits_per_move = 800
 playout_cap = { mode = "disabled" }
 seed = 42
 temperature = 1.0
-cooling = { mode = "after", ply = 30, temperature = 0.5 }
+cooling = { mode = "after", ply = 45, temperature = 0.5 }

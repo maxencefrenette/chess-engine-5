@@ -4,14 +4,14 @@ batch_size = 128
 reply_weight = 0.15
 weight_averaging = { mode = "disabled" }
 seed = 42
-value_sample_rate = 0.5
+value_sample_rate = 0.75
 root_wdl_fraction = 0.5
-value_loss_weight = 0.3
+value_loss_weight = 0.6
 value_rescoring = { mode = "disabled" }
 
 [[curriculum]]
-dataset = "/data/chess/chess-engine-5/models/root-wdl-2026.11.18/crank-1/generation/v4/1795066087055631071-1123683"
-num_positions = 309000
+dataset = "/data/chess/chess-engine-5/models/day-2026.11.19/datagen-visits/visits-800-data/v4/1795158978137675233-1787082"
+num_positions = 370100
 epochs = 15.0
 
 [optimizer]
@@ -31,7 +31,7 @@ heads = 4
 layers = 1
 ffn_width = 128
 policy_width = 32
-value = { kind = "pooled", hidden = 16 }
+value = { kind = "attention", hidden = 16 }
 
 [model.smolgen]
 mode = "enabled"

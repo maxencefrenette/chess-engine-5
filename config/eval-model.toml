@@ -1,4 +1,4 @@
-baseline_dir = "/data/chess/chess-engine-5/models/root-wdl-2026.11.18/root-value-sampling-and-weight/weight-0.3-rate-0.5"
+baseline_dir = "/data/chess/chess-engine-5/models/day-2026.11.19/datagen-visits/visits-800"
 opening_book = "UHO_Lichess_4560_v1.epd"
 device = "cuda"
 batch = 128
