@@ -74,26 +74,23 @@ mod tests {
         let mut packed = Vec::new();
         let mut expected = Vec::new();
         for i in 0..256usize {
-            let board = std::array::from_fn(|s| (((s + i) % 13) | (((s * 7 + i) % 13) << 4)) as u8);
-            let flags = [
-                (i % 2) as u8,
-                (i % 16) as u8,
-                (i % 65) as u8,
-                i as u8,
-                (i % 4) as u8,
-            ];
-            packed.extend(board);
-            packed.extend(flags);
-            crate::encode_position(
-                &mut expected,
-                &board,
-                flags[0] != 0,
-                flags[1],
-                flags[2],
-                flags[3],
-                flags[4],
-            )
-            .unwrap();
+            let snapshot = chess_data::Board {
+                board: std::array::from_fn(|s| (((s + i) % 13) | (((s * 7 + i) % 13) << 4)) as u8),
+                castling: (i % 16) as u8,
+                ep_square: (i % 65) as u8,
+                halfmove_clock: i as u8,
+                repetitions: (i % 4) as u8,
+            };
+            let black = i % 2 == 1;
+            packed.extend(snapshot.board);
+            packed.extend([
+                u8::from(black),
+                snapshot.castling,
+                snapshot.ep_square,
+                snapshot.halfmove_clock,
+                snapshot.repetitions,
+            ]);
+            crate::encode_position(&mut expected, &snapshot, black).unwrap();
         }
         let actual = Tensor::from_vec(packed, (256, PACKED), &Device::new_cuda(0)?)?
             .apply_op1_no_bwd(&Encode)?

@@ -168,23 +168,13 @@ fn encode_row(
 ) -> Result<Row> {
     let root = row.position.root_wdl();
     let snapshot = &row.position.snapshot;
-    let board = &snapshot.board;
     let black_to_move = !row.position.ply.is_multiple_of(2);
     let mut features = Vec::with_capacity(SQUARES * INPUTS);
-    encode_position(
-        &mut features,
-        board,
-        black_to_move,
-        snapshot.castling,
-        snapshot.ep_square,
-        snapshot.halfmove_clock,
-        snapshot.repetitions,
-    )
-    .ok_or("invalid piece code")?;
+    encode_position(&mut features, snapshot, black_to_move).ok_or("invalid piece code")?;
     Ok(Row {
         game: row.game_id,
         black: black_to_move,
-        material: chess_network::hints::material_key(board, black_to_move),
+        material: chess_network::hints::material_key(&snapshot.board, black_to_move),
         outcome: row.value,
         hint: [0.; chess_network::hints::FEATURES],
         features,

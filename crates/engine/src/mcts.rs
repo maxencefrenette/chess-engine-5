@@ -100,6 +100,24 @@ impl Search {
         }
     }
 
+    /// Reserve up to `limit` leaves for evaluation and return the number collected.
+    pub fn collect_leaves(
+        &mut self,
+        game: &Game,
+        budget: NonZeroU32,
+        exploration: f32,
+        limit: usize,
+        mut collect: impl FnMut(Leaf),
+    ) -> usize {
+        for count in 0..limit {
+            let Some(leaf) = self.next_leaf(game, budget, exploration) else {
+                return count;
+            };
+            collect(leaf);
+        }
+        limit
+    }
+
     /// Advance through terminal simulations until there is an evaluation to do.
     pub fn next_leaf(&mut self, game: &Game, budget: NonZeroU32, exploration: f32) -> Option<Leaf> {
         while self.tree.nodes[0].visits + self.tree.nodes[0].pending < budget.get() {

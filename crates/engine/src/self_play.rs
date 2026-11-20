@@ -152,18 +152,14 @@ fn play_games(
             } else {
                 fast_visits
             };
-            let before = pending.len();
-            for _ in 0..config.leaves_per_game.get() {
-                let Some(leaf) = slot.search.next_leaf(
-                    &slot.game,
-                    NonZeroU32::from(visits),
-                    settings.exploration,
-                ) else {
-                    break;
-                };
-                pending.push((i, leaf));
-            }
-            if pending.len() == before
+            let collected = slot.search.collect_leaves(
+                &slot.game,
+                NonZeroU32::from(visits),
+                settings.exploration,
+                config.leaves_per_game.get(),
+                |leaf| pending.push((i, leaf)),
+            );
+            if collected == 0
                 && let Some(outcome) = slot.play(
                     match config.cooling {
                         Cooling::After { ply, temperature } if slot.ply >= ply => temperature,

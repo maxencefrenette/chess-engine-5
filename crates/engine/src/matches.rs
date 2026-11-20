@@ -268,17 +268,14 @@ pub fn run(
         for (i, slot) in active.iter_mut().enumerate() {
             let side = slot.player();
             let batch = &mut pending[side];
-            let before = batch.len();
-            for _ in 0..options.leaves_per_game.get() {
-                let Some(leaf) =
-                    slot.search
-                        .next_leaf(&slot.game, visits[side], settings.exploration)
-                else {
-                    break;
-                };
-                batch.push((i, leaf));
-            }
-            if batch.len() == before
+            let collected = slot.search.collect_leaves(
+                &slot.game,
+                visits[side],
+                settings.exploration,
+                usize::from(options.leaves_per_game.get()),
+                |leaf| batch.push((i, leaf)),
+            );
+            if collected == 0
                 && let Some(outcome) = slot.play()
             {
                 let points = match outcome {

@@ -9,6 +9,7 @@ use candle_nn::{
     Init, LayerNorm, Linear, Module, VarBuilder, layer_norm, linear, linear_no_bias,
     ops::{layer_norm_slow, softmax, softmax_last_dim},
 };
+use chess_data::Board;
 use value::{ValueConfig, ValueHead};
 
 pub const SQUARES: usize = 64;
@@ -362,17 +363,9 @@ impl Net {
 }
 
 /// Append 64 square tokens from the v1 packed-board representation.
-pub fn encode_position(
-    output: &mut Vec<f32>,
-    board: &[u8; 32],
-    black_to_move: bool,
-    castling: u8,
-    ep_square: u8,
-    halfmove_clock: u8,
-    repetitions: u8,
-) -> Option<()> {
+pub fn encode_position(output: &mut Vec<f32>, snapshot: &Board, black_to_move: bool) -> Option<()> {
     for square in 0..SQUARES {
-        let piece = (board[square / 2] >> (4 * (square % 2))) & 15;
+        let piece = (snapshot.board[square / 2] >> (4 * (square % 2))) & 15;
         if piece > 12 {
             return None;
         }
@@ -380,11 +373,11 @@ pub fn encode_position(
         token[piece as usize] = 1.;
         token[13] = f32::from(black_to_move);
         for bit in 0..4 {
-            token[14 + bit] = f32::from((castling >> bit) & 1);
+            token[14 + bit] = f32::from((snapshot.castling >> bit) & 1);
         }
-        token[18] = f32::from(ep_square as usize == square);
-        token[19] = f32::from(halfmove_clock) / 100.;
-        token[20] = f32::from(repetitions) - 1.;
+        token[18] = f32::from(snapshot.ep_square as usize == square);
+        token[19] = f32::from(snapshot.halfmove_clock) / 100.;
+        token[20] = f32::from(snapshot.repetitions) - 1.;
         output.extend(token);
     }
     Some(())

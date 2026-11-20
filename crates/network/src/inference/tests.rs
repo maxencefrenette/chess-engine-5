@@ -49,16 +49,7 @@ fn cuda_replays_match_eager_with_changing_inputs() -> Result<(), Box<dyn std::er
                 &crate::hints::material_key(&b.board, black),
                 model.net.config.hints,
             ));
-            encode_position(
-                &mut features,
-                &b.board,
-                black,
-                b.castling,
-                b.ep_square,
-                b.halfmove_clock,
-                b.repetitions,
-            )
-            .unwrap();
+            encode_position(&mut features, &b, black).unwrap();
         }
         let unpadded = PolicyInputs::new(
             features,
@@ -168,16 +159,7 @@ fn material_hints_survive_cuda_graph_replay() -> Result<(), Box<dyn std::error::
                         .hints
                         .lookup(&material_key(&b.board, black), config.hints),
                 );
-                encode_position(
-                    &mut features,
-                    &b.board,
-                    black,
-                    b.castling,
-                    b.ep_square,
-                    b.halfmove_clock,
-                    b.repetitions,
-                )
-                .unwrap();
+                encode_position(&mut features, &b, black).unwrap();
             }
             let inputs = PolicyInputs::new(
                 features,

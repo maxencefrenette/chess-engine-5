@@ -85,16 +85,8 @@ impl InferenceModel {
                 &crate::hints::material_key(&snapshot.board, black),
                 self.net.config.hints,
             ));
-            encode_position(
-                &mut features,
-                &snapshot.board,
-                black,
-                snapshot.castling,
-                snapshot.ep_square,
-                snapshot.halfmove_clock,
-                snapshot.repetitions,
-            )
-            .ok_or_else(|| io::Error::other("invalid piece code"))?;
+            encode_position(&mut features, &snapshot, black)
+                .ok_or_else(|| io::Error::other("invalid piece code"))?;
         }
         let (policy, wdl) = PolicyInputs::new(features, moves.clone(), &self.device)
             .and_then(|inputs| inputs.with_hints(hints))
