@@ -75,6 +75,7 @@ pub struct Options {
     leaves_per_game: NonZeroU16,
     baseline_visits_per_move: NonZeroU32,
     max_pairs: u64,
+    min_passed_gainer_pairs: u64,
     seed: u64,
     sprt: SprtPresets,
 }
@@ -82,7 +83,10 @@ pub struct Options {
 fn nelo_summary(counts: [u64; 5], sprt: Option<&sprt::Config>) -> String {
     let (estimate, method) = match sprt {
         Some(config) => (config.estimate(counts), "SPRT-adjusted approximate 95% CI"),
-        None => (sprt::fixed_estimate(counts), "approximate 95% CI"),
+        None => (
+            sprt::fixed_estimate(counts),
+            "fixed-sample approximate 95% CI",
+        ),
     };
     match estimate {
         Some(sprt::Estimate {
@@ -200,10 +204,13 @@ pub fn run(
             "batch must be positive and max pairs must be positive and fit twice in u64",
         ));
     }
-    let sprt = match mode {
-        Mode::Gainer => Some(options.sprt.gainer),
-        Mode::NonRegression => Some(options.sprt.non_regression),
-        Mode::Fixed => None,
+    let (mut sprt, pass_floor) = match mode {
+        Mode::Gainer => (
+            Some(options.sprt.gainer),
+            options.min_passed_gainer_pairs.min(options.max_pairs),
+        ),
+        Mode::NonRegression => (Some(options.sprt.non_regression), 0),
+        Mode::Fixed => (None, 0),
     };
     if sprt.as_ref().is_some_and(|sprt| !sprt.validate()) {
         return Err(io::Error::other("invalid SPRT nElo bounds or error rates"));
@@ -235,7 +242,7 @@ pub fn run(
         options.baseline_visits_per_move,
         matched_speed,
     )?;
-    let limit = 2 * options.max_pairs;
+    let mut limit = 2 * options.max_pairs;
     let mut next_id = u64::from(options.batch).min(limit);
     let mut active: Vec<_> = (0..next_id)
         .map(|id| ActiveGame::new(id, &openings))
@@ -245,6 +252,7 @@ pub fn run(
     let mut counts = [0; 5];
     let mut wdl = [0; 3];
     let mut llr = 0.0;
+    let mut early_pass = None;
     let mut max_batches = [0; 2];
     if let Some(sprt) = &sprt {
         println!(
@@ -262,7 +270,7 @@ pub fn run(
         options.seed
     );
 
-    while !active.is_empty() {
+    'games: while !active.is_empty() {
         let mut pending: [Vec<(usize, Leaf)>; 2] = [Vec::new(), Vec::new()];
         let mut finished = Vec::new();
         for (i, slot) in active.iter_mut().enumerate() {
@@ -323,10 +331,20 @@ pub fn run(
                 );
             }
             if let Some((hypothesis, nelo)) = decision {
-                println!(
-                    "accepted {hypothesis} ({nelo:+} nElo); largest inference batches (baseline/candidate)={max_batches:?}"
-                );
-                return Ok(());
+                if hypothesis == "H1" && next_pair < pass_floor {
+                    println!("gainer passed at pair {next_pair}; continuing to {pass_floor} pairs");
+                    early_pass = Some((next_pair, nelo));
+                    sprt = None;
+                    limit = 2 * pass_floor;
+                } else {
+                    println!(
+                        "accepted {hypothesis} ({nelo:+} nElo); largest inference batches (baseline/candidate)={max_batches:?}"
+                    );
+                    return Ok(());
+                }
+            }
+            if next_pair == limit / 2 {
+                break 'games;
             }
         }
 
@@ -348,10 +366,12 @@ pub fn run(
             }
         }
     }
-    let status = if sprt.is_some() {
-        "inconclusive at cap"
+    let status = if let Some((pair, nelo)) = early_pass {
+        format!("accepted H1 ({nelo:+} nElo) at pair {pair}")
+    } else if sprt.is_some() {
+        "inconclusive at cap".into()
     } else {
-        "fixed match complete"
+        "fixed match complete".into()
     };
     let evidence = if sprt.is_some() {
         format!(" LLR={llr:.4}")
@@ -419,7 +439,7 @@ mod tests {
         );
         assert_eq!(
             nelo_summary(counts, None),
-            "+28.1 (+17.3, +38.9) [approximate 95% CI]"
+            "+28.1 (+17.3, +38.9) [fixed-sample approximate 95% CI]"
         );
         for counts in [
             [0; 5],

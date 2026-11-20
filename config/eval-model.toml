@@ -5,6 +5,7 @@ batch = 128
 leaves_per_game = 4
 baseline_visits_per_move = 800
 max_pairs = 10000
+min_passed_gainer_pairs = 500
 seed = 42
 
 # Run-to-run variation in loss

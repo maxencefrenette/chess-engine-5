@@ -117,5 +117,5 @@ An experiment report must include the following:
 
 If a baseline match was run, include:
 * The candidate's wins, draws, and losses (W/D/L)
-* Observed nElo with its 95% confidence interval
+* Observed nElo with its 95% confidence interval from the final match summary. When a gainer passes early, use its fixed-sample estimate over all pairs at the configured floor.
 * The SPRT verdict (passed, failed, or inconclusive)
