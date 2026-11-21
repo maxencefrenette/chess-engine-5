@@ -14,6 +14,21 @@ use crate::{
     mcts::{Leaf, MoveVisits, Search},
 };
 
+pub(crate) type Input = ((chess_data::Board, bool), Vec<u16>);
+
+impl Leaf {
+    pub(crate) fn board_input(&self) -> (chess_data::Board, bool) {
+        (
+            self.game.snapshot(&self.moves),
+            self.game.turn() == Color::Black,
+        )
+    }
+
+    pub(crate) fn packed_moves(&self) -> impl ExactSizeIterator<Item = u16> + Clone + '_ {
+        self.moves.iter().map(|mv| mv.packed())
+    }
+}
+
 pub struct ModelEvaluator {
     model: InferenceModel,
     pub(crate) model_dir: PathBuf,
@@ -33,15 +48,16 @@ impl ModelEvaluator {
 
     pub(crate) fn evaluate(&self, batch: &[(usize, Leaf)]) -> io::Result<Vec<Prediction>> {
         self.model.evaluate(
-            batch.iter().map(|(_, leaf)| {
-                (
-                    leaf.game.snapshot(&leaf.moves),
-                    leaf.game.turn() == Color::Black,
-                )
-            }),
-            batch
-                .iter()
-                .map(|(_, leaf)| leaf.moves.iter().map(|mv| mv.packed())),
+            batch.iter().map(|(_, leaf)| leaf.board_input()),
+            batch.iter().map(|(_, leaf)| leaf.packed_moves()),
+        )
+    }
+
+    pub(crate) fn evaluate_inputs(&self, batch: Vec<Input>) -> io::Result<Vec<Prediction>> {
+        let (boards, moves): (Vec<_>, Vec<_>) = batch.into_iter().unzip();
+        self.model.evaluate(
+            boards.into_iter(),
+            moves.iter().map(|row| row.iter().copied()),
         )
     }
 

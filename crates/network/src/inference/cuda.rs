@@ -1,18 +1,44 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use candle_core::cuda_backend::{
     CudaDType,
     cudarc::{
         driver::result::DriverError,
         driver::{CudaGraph, DeviceRepr, sys},
+        nvrtc::{CompileOptions, compile_ptx_with_opts},
     },
 };
 use candle_core::{CpuStorage, CudaStorage, DType, Device, InplaceOp1, Layout, Result, Tensor};
 
-use crate::{Net, move_indices};
+use crate::Net;
 
 mod encode;
-use encode::{Encode, PACKED};
+mod policy;
+use encode::{DecodeMoves, Encode, PACKED};
+
+type PtxCache = std::sync::OnceLock<std::result::Result<String, String>>;
+
+fn compile(
+    cache: &'static PtxCache,
+    source: &str,
+    arch: Option<&'static str>,
+) -> Result<&'static str> {
+    cache
+        .get_or_init(|| {
+            compile_ptx_with_opts(
+                source,
+                CompileOptions {
+                    fmad: Some(false),
+                    arch,
+                    ..Default::default()
+                },
+            )
+            .map(|ptx| ptx.to_src())
+            .map_err(|e| e.to_string())
+        })
+        .as_deref()
+        .map_err(|e| candle_core::Error::Msg(e.clone()))
+}
 
 type Logits = (Vec<Vec<f32>>, Vec<Vec<f32>>);
 
@@ -20,11 +46,45 @@ type Logits = (Vec<Vec<f32>>, Vec<Vec<f32>>);
 #[derive(Default)]
 pub(super) struct Inference {
     entries: VecDeque<Entry>,
+    shapes: GraphShapes,
+}
+
+const HOT_SHAPES: usize = 8;
+const SHAPE_WINDOW: usize = 2048;
+
+// Re-estimate which irregular shapes justify capturing a graph as games progress.
+#[derive(Default)]
+struct GraphShapes {
+    counts: HashMap<(usize, usize), usize>,
+    calls: usize,
+    frequent: [(usize, usize); HOT_SHAPES],
+}
+
+impl GraphShapes {
+    fn observe(&mut self, shape: (usize, usize)) -> bool {
+        let regular = shape.0.is_power_of_two();
+        if !regular {
+            *self.counts.entry(shape).or_default() += 1;
+        }
+        self.calls += 1;
+        if self.calls == SHAPE_WINDOW {
+            let mut counts: Vec<_> = self.counts.drain().collect();
+            counts.sort_unstable_by_key(|&(shape, count)| (std::cmp::Reverse(count), shape));
+            self.frequent = std::array::from_fn(|i| {
+                counts
+                    .get(i)
+                    .filter(|(_, count)| *count >= 32)
+                    .map_or((0, 0), |&(shape, _)| shape)
+            });
+            self.calls = 0;
+        }
+        regular || self.frequent.contains(&shape)
+    }
 }
 
 struct Entry {
     graph: CudaGraph,
-    inputs: [Tensor; 4],
+    inputs: [Tensor; 2],
     outputs: (Tensor, Tensor),
     shape: (usize, usize),
 }
@@ -46,9 +106,7 @@ impl Inference {
             .max(1)
             .next_power_of_two();
         let mut boards = vec![0u8; batch * PACKED];
-        let mut indices = vec![0u32; batch * width];
-        let mut promotions = indices.clone();
-        let mut promotes = vec![0f32; batch * width];
+        let mut packed_moves = vec![0u8; batch * width * 2];
         for (i, ((board, black), moves)) in positions.zip(moves).enumerate() {
             let (board, black, mask) = net.config.perspective.orient(board, black);
             if board.board.iter().any(|&b| (b & 15) > 12 || (b >> 4) > 12) {
@@ -64,31 +122,25 @@ impl Inference {
                 board.repetitions,
             ]);
             for (j, mv) in moves.enumerate() {
-                (
-                    indices[i * width + j],
-                    promotions[i * width + j],
-                    promotes[i * width + j],
-                ) = move_indices(mv ^ mask);
+                let offset = 2 * (i * width + j);
+                packed_moves[offset..offset + 2].copy_from_slice(&(mv ^ mask).to_le_bytes());
             }
         }
-        // Padding the batch dimension changes BF16 GEMM results. Capture common
-        // exact sizes; irregular batches use eager inference without padding.
-        if !batch.is_power_of_two() {
+        // Use exact sizes because batch padding changes BF16 GEMM results.
+        let shape = (batch, width);
+        if !self.shapes.observe(shape) {
             let inputs = [
                 Tensor::from_vec(boards, (batch, PACKED), device)?,
-                Tensor::from_vec(indices, (batch, width), device)?,
-                Tensor::from_vec(promotions, (batch, width), device)?,
-                Tensor::from_vec(promotes, (batch, width), device)?,
+                Tensor::from_vec(packed_moves, (batch, width, 2), device)?,
             ];
             let (policy, value) = forward(net, &inputs)?;
             return Ok((policy.to_vec2()?, value.to_vec2()?));
         }
-        let shape = (batch, width);
         let found = self.entries.iter().position(|entry| entry.shape == shape);
         let entry = match found {
             Some(index) => self.entries.remove(index).unwrap(),
             None => {
-                if self.entries.len() == 4 {
+                if self.entries.len() == 4 + HOT_SHAPES {
                     self.entries.pop_front();
                 }
                 Entry::new(net, device, shape)?
@@ -97,9 +149,7 @@ impl Inference {
         self.entries.push_back(entry);
         let entry = self.entries.back().unwrap();
         entry.inputs[0].inplace_op1(&Upload(&boards))?;
-        entry.inputs[1].inplace_op1(&Upload(&indices))?;
-        entry.inputs[2].inplace_op1(&Upload(&promotions))?;
-        entry.inputs[3].inplace_op1(&Upload(&promotes))?;
+        entry.inputs[1].inplace_op1(&Upload(&packed_moves))?;
         entry.graph.launch().map_err(cuda_error)?;
         Ok((entry.outputs.0.to_vec2()?, entry.outputs.1.to_vec2()?))
     }
@@ -110,9 +160,7 @@ impl Entry {
         let (batch, width) = shape;
         let inputs = [
             Tensor::zeros((batch, PACKED), DType::U8, device)?,
-            Tensor::zeros((batch, width), DType::U32, device)?,
-            Tensor::zeros((batch, width), DType::U32, device)?,
-            Tensor::zeros((batch, width), DType::F32, device)?,
+            Tensor::zeros((batch, width, 2), DType::U8, device)?,
         ];
         let cuda = device.as_cuda_device()?;
         let _cache = cuda.enable_cuda_graph_htod_cache();
@@ -142,9 +190,21 @@ impl Entry {
     }
 }
 
-fn forward(net: &Net, inputs: &[Tensor; 4]) -> Result<(Tensor, Tensor)> {
+fn forward(net: &Net, inputs: &[Tensor; 2]) -> Result<(Tensor, Tensor)> {
     let positions = inputs[0].apply_op1_no_bwd(&Encode)?;
-    let (policy, value) = net.forward(&positions, &inputs[1], &inputs[2], &inputs[3])?;
+    let moves = inputs[1].apply_op1_no_bwd(&DecodeMoves)?;
+    let (indices, promotions, promotes) = (moves.get(0)?, moves.get(1)?, moves.get(2)?);
+    let (policy, value) =
+        if net.config.inference_precision.dtype() == DType::BF16 && net.config.policy_width == 32 {
+            let encoded = net.encode(&positions)?;
+            let policy = net.policy_from_scores(&encoded, &promotions, &promotes, |q, k| {
+                q.apply_op3_no_bwd(k, &indices, &policy::LegalDots)?
+                    .affine(32f64.sqrt().recip(), 0.)
+            })?;
+            (policy, net.value.logits(&encoded)?)
+        } else {
+            net.forward(&positions, &indices, &promotions, &promotes)?
+        };
     Ok((policy.to_dtype(DType::F32)?, value.to_dtype(DType::F32)?))
 }
 
@@ -170,5 +230,27 @@ impl<T: CudaDType + DeviceRepr + 'static> InplaceOp1 for Upload<'_, T> {
         }
         let device = storage.device.clone();
         device.memcpy_htod(self.0, storage.as_cuda_slice_mut::<T>()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GraphShapes, SHAPE_WINDOW};
+
+    #[test]
+    fn graph_admission_tracks_frequent_exact_shapes_as_the_workload_changes() {
+        let mut shapes = GraphShapes::default();
+        assert!(shapes.observe((256, 64)));
+        assert!(!shapes.observe((255, 64)));
+        for _ in 2..SHAPE_WINDOW {
+            shapes.observe((253, 64));
+        }
+        assert!(shapes.observe((253, 64)));
+        assert!(!shapes.observe((253, 32)));
+        for _ in 2..SHAPE_WINDOW {
+            shapes.observe((249, 32));
+        }
+        assert!(shapes.observe((249, 32)));
+        assert!(!shapes.observe((253, 64)));
     }
 }

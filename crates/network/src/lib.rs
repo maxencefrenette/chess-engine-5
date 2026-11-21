@@ -301,12 +301,24 @@ impl Net {
         promotion_index: &Tensor,
         promotes: &Tensor,
     ) -> Result<Tensor> {
+        self.policy_from_scores(x, promotion_index, promotes, |q, k| {
+            q.matmul(&k.transpose(1, 2)?)?
+                .affine((self.config.policy_width as f64).sqrt().recip(), 0.)?
+                .flatten_from(1)?
+                .gather(move_index, 1)
+        })
+    }
+
+    fn policy_from_scores(
+        &self,
+        x: &Tensor,
+        promotion_index: &Tensor,
+        promotes: &Tensor,
+        legal_scores: impl FnOnce(&Tensor, &Tensor) -> Result<Tensor>,
+    ) -> Result<Tensor> {
         let q = self.policy_query.forward(x)?;
         let k = self.policy_key.forward(x)?;
-        let logits = q
-            .matmul(&k.transpose(1, 2)?)?
-            .affine((self.config.policy_width as f64).sqrt().recip(), 0.)?;
-        let legal = logits.flatten_from(1)?.gather(move_index, 1)?;
+        let legal = legal_scores(&q, &k)?;
         let offsets = self
             .promotion
             .forward(&k)?

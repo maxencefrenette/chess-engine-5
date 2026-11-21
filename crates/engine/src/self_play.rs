@@ -1,12 +1,11 @@
 use std::{
     env, fs,
-    num::{NonZeroU16, NonZeroU32, NonZeroUsize},
+    num::{NonZeroU16, NonZeroUsize},
     path::PathBuf,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use chess_data::{FORMAT_VERSION, Position, Result, write_shard};
-use chess_network::inference::Prediction;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde_json::json;
@@ -27,6 +26,7 @@ pub struct Config {
     games_per_shard: NonZeroUsize,
     batch: NonZeroUsize,
     leaves_per_game: NonZeroUsize,
+    search_threads: NonZeroUsize,
     visits_per_move: NonZeroU16,
     seed: u64,
     #[range(min = 0.0)]
@@ -94,6 +94,41 @@ impl ActiveGame {
         }
     }
 
+    fn collect(
+        &mut self,
+        settings: &Settings,
+        config: &Config,
+        fast_visits: NonZeroU16,
+        full_search_rate: f64,
+        collect: impl FnMut(Leaf),
+    ) -> Option<i8> {
+        let visits = if self.full_search {
+            config.visits_per_move
+        } else {
+            fast_visits
+        };
+        if self.search.collect_leaves(
+            &self.game,
+            visits.into(),
+            settings.exploration,
+            config.leaves_per_game.get(),
+            collect,
+        ) > 0
+        {
+            return None;
+        }
+        let temperature = match config.cooling {
+            Cooling::After { ply, temperature } if self.ply >= ply => temperature,
+            _ => config.temperature,
+        };
+        self.play(temperature, full_search_rate)
+            .map(|outcome| match outcome {
+                Outcome::Win(Color::White) => 1,
+                Outcome::Win(Color::Black) => -1,
+                Outcome::Draw => 0,
+            })
+    }
+
     fn play(&mut self, temperature: f64, full_search_rate: f64) -> Option<Outcome> {
         let played = self.search.choose_move(temperature, &mut self.rng);
         if self.full_search {
@@ -124,85 +159,8 @@ impl ActiveGame {
     }
 }
 
-fn play_games(
-    settings: &Settings,
-    config: &Config,
-    mut ids: std::ops::Range<usize>,
-    mut evaluate: impl FnMut(&[(usize, Leaf)]) -> std::io::Result<Vec<Prediction>>,
-) -> Result<Vec<(usize, PlayedGame)>> {
-    let (fast_visits, full_search_rate) = match config.playout_cap {
-        PlayoutCap::Disabled {} => (config.visits_per_move, 1.0),
-        PlayoutCap::Enabled {
-            fast_visits,
-            full_search_rate,
-        } => (fast_visits, full_search_rate),
-    };
-    let mut completed = Vec::with_capacity(ids.len());
-    let mut active: Vec<_> = ids
-        .by_ref()
-        .take(config.batch.get())
-        .map(|id| ActiveGame::new(config.seed, id, full_search_rate))
-        .collect();
-    while !active.is_empty() {
-        let mut pending = Vec::new();
-        let mut finished = Vec::new();
-        for (i, slot) in active.iter_mut().enumerate() {
-            let visits = if slot.full_search {
-                config.visits_per_move
-            } else {
-                fast_visits
-            };
-            let collected = slot.search.collect_leaves(
-                &slot.game,
-                NonZeroU32::from(visits),
-                settings.exploration,
-                config.leaves_per_game.get(),
-                |leaf| pending.push((i, leaf)),
-            );
-            if collected == 0
-                && let Some(outcome) = slot.play(
-                    match config.cooling {
-                        Cooling::After { ply, temperature } if slot.ply >= ply => temperature,
-                        _ => config.temperature,
-                    },
-                    full_search_rate,
-                )
-            {
-                let white_value = match outcome {
-                    Outcome::Win(Color::White) => 1,
-                    Outcome::Win(Color::Black) => -1,
-                    Outcome::Draw => 0,
-                };
-                finished.push((i, white_value));
-            }
-        }
-        let evaluations = evaluate(&pending)?;
-        for ((i, leaf), result) in pending.into_iter().zip(evaluations) {
-            active[i]
-                .search
-                .evaluate(leaf, result.value, result.draw, &result.priors);
-        }
-        for (i, white_value) in finished.into_iter().rev() {
-            let slot = if let Some(id) = ids.next() {
-                std::mem::replace(
-                    &mut active[i],
-                    ActiveGame::new(config.seed, id, full_search_rate),
-                )
-            } else {
-                active.swap_remove(i)
-            };
-            completed.push((
-                slot.id,
-                PlayedGame {
-                    positions: slot.positions,
-                    white_value,
-                },
-            ));
-        }
-    }
-    completed.sort_unstable_by_key(|(id, _)| *id);
-    Ok(completed)
-}
+mod scheduler;
+use scheduler::play_games;
 
 pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) -> Result<PathBuf> {
     if let PlayoutCap::Enabled { fast_visits, .. } = config.playout_cap
@@ -228,8 +186,8 @@ pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) ->
     for start in (0..total_games).step_by(games_per_shard) {
         let end = start.saturating_add(games_per_shard).min(total_games);
         let started = Instant::now();
-        let games = play_games(settings, config, start..end, |pending| {
-            model.evaluate(pending)
+        let games = play_games(settings, config, start..end, |batch| {
+            model.evaluate_inputs(batch)
         })?;
         let elapsed = started.elapsed();
         generation_seconds += elapsed.as_secs_f64();
@@ -281,6 +239,7 @@ pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) ->
         "checkpoint": model.model_dir,
         "device": config.device,
         "game_batch": config.batch.get(),
+        "search_threads": config.search_threads.get(),
         "leaves_per_game": config.leaves_per_game.get(),
         "sampling": "chacha8-stream-per-game; temperature applied to root visits",
         "temperature": config.temperature,
@@ -299,10 +258,22 @@ mod tests {
     use chess_config::TomlConfig;
 
     #[test]
+    fn queued_workers_finish_when_inference_fails() -> Result<()> {
+        let config = Config::from_repo_file("datagen.toml")?;
+        let settings = Settings::load()?;
+        let result = play_games(&settings, &config, 0..16, |_| {
+            Err(std::io::Error::other("failed inference"))
+        });
+        assert_eq!(result.err().unwrap().to_string(), "failed inference");
+        Ok(())
+    }
+
+    #[test]
     fn refilling_preserves_seeded_games_and_ids() -> Result<()> {
         let mut config = Config::from_repo_file("datagen.toml")?;
         config.visits_per_move = NonZeroU16::new(4).unwrap();
         let settings = Settings::load()?;
+        config.search_threads = NonZeroUsize::new(2).unwrap();
         for cap in [
             PlayoutCap::Disabled {},
             PlayoutCap::Enabled {
@@ -313,12 +284,13 @@ mod tests {
             config.playout_cap = cap;
             let run = |config: &Config| {
                 play_games(&settings, config, 5..12, |pending| {
+                    assert!(pending.len() <= config.batch.get() * config.leaves_per_game.get());
                     Ok(pending
                         .iter()
-                        .map(|(_, leaf)| Prediction {
+                        .map(|(_, moves)| chess_network::inference::Prediction {
                             value: 0.0,
                             draw: 0.5,
-                            priors: vec![1.0 / leaf.moves.len() as f32; leaf.moves.len()],
+                            priors: vec![1.0 / moves.len() as f32; moves.len()],
                         })
                         .collect())
                 })

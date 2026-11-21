@@ -14,3 +14,13 @@ extern "C" __global__ void encode_boards(const unsigned char* boards, float* out
     else value = (float)b[36] - 1.0f;
     output[i] = value;
 }
+
+extern "C" __global__ void decode_moves(const unsigned char* moves, unsigned int* decoded, unsigned int count) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+    unsigned int mv = moves[2 * i] | (moves[2 * i + 1] << 8);
+    unsigned int from = mv & 63, to = (mv >> 6) & 63, promotion = mv >> 12;
+    decoded[i] = from * 64 + to;
+    decoded[count + i] = to * 4 + (promotion ? promotion - 1 : 0);
+    decoded[2ull * count + i] = promotion != 0;
+}

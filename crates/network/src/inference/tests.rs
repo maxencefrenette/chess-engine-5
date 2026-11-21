@@ -25,19 +25,32 @@ fn cuda_replays_match_eager_with_changing_inputs() -> Result<(), Box<dyn std::er
         Path::new(config["baseline_dir"].as_str().unwrap()),
         DeviceConfig::Cuda,
     )?;
-    for (iteration, size) in [512usize, 512, 17, 128, 1, 2, 4, 8, 16, 257, 33, 512, 17]
-        .into_iter()
-        .enumerate()
+    for (iteration, (size, width)) in [
+        (512, 19usize),
+        (512, 19),
+        (17, 9),
+        (128, 1),
+        (1, 2),
+        (2, 4),
+        (4, 7),
+        (8, 19),
+        (16, 65),
+        (257, 9),
+        (33, 1),
+        (512, 2),
+        (17, 65),
+    ]
+    .into_iter()
+    .enumerate()
     {
         model.net.config.perspective = if iteration % 2 == 0 {
             crate::perspective::Perspective::SideToMove
         } else {
             crate::perspective::Perspective::Absolute
         };
-        let width = [19usize, 65, 9][iteration % 3];
         let moves: Vec<Vec<u16>> = (0..size)
             .map(|i| {
-                (0..width - i % 3)
+                (0..width.saturating_sub(i % 3).max(1))
                     .map(|j| ((j % 64) | (((j + 17) % 64) << 6) | ((j % 5) << 12)) as u16)
                     .collect()
             })
