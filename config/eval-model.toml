@@ -1,7 +1,8 @@
 baseline_dir = "/data/chess/chess-engine-5/models/day-2026.11.20/self-play-refresh/fresh"
 opening_book = "UHO_Lichess_4560_v1.epd"
 device = "cuda"
-batch = 128
+batch = 256
+search_threads = 2
 leaves_per_game = 4
 baseline_visits_per_move = 800
 max_pairs = 10000

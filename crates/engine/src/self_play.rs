@@ -186,9 +186,7 @@ pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) ->
     for start in (0..total_games).step_by(games_per_shard) {
         let end = start.saturating_add(games_per_shard).min(total_games);
         let started = Instant::now();
-        let games = play_games(settings, config, start..end, |batch| {
-            model.evaluate_inputs(batch)
-        })?;
+        let games = play_games(settings, config, start..end, |batch| model.evaluate(batch))?;
         let elapsed = started.elapsed();
         generation_seconds += elapsed.as_secs_f64();
         let shard_positions: usize = games.iter().map(|(_, game)| game.positions.len()).sum();

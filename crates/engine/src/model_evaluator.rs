@@ -17,15 +17,14 @@ use crate::{
 pub(crate) type Input = ((chess_data::Board, bool), Vec<u16>);
 
 impl Leaf {
-    pub(crate) fn board_input(&self) -> (chess_data::Board, bool) {
+    pub(crate) fn input(&self) -> Input {
         (
-            self.game.snapshot(&self.moves),
-            self.game.turn() == Color::Black,
+            (
+                self.game.snapshot(&self.moves),
+                self.game.turn() == Color::Black,
+            ),
+            self.moves.iter().map(|mv| mv.packed()).collect(),
         )
-    }
-
-    pub(crate) fn packed_moves(&self) -> impl ExactSizeIterator<Item = u16> + Clone + '_ {
-        self.moves.iter().map(|mv| mv.packed())
     }
 }
 
@@ -46,14 +45,7 @@ impl ModelEvaluator {
         self.model.value_config()
     }
 
-    pub(crate) fn evaluate(&self, batch: &[(usize, Leaf)]) -> io::Result<Vec<Prediction>> {
-        self.model.evaluate(
-            batch.iter().map(|(_, leaf)| leaf.board_input()),
-            batch.iter().map(|(_, leaf)| leaf.packed_moves()),
-        )
-    }
-
-    pub(crate) fn evaluate_inputs(&self, batch: Vec<Input>) -> io::Result<Vec<Prediction>> {
+    pub(crate) fn evaluate(&self, batch: Vec<Input>) -> io::Result<Vec<Prediction>> {
         let (boards, moves): (Vec<_>, Vec<_>) = batch.into_iter().unzip();
         self.model.evaluate(
             boards.into_iter(),
@@ -72,9 +64,10 @@ impl ModelEvaluator {
         }
         let mut search = Search::new();
         while let Some(leaf) = search.next_leaf(game, visits, exploration) {
-            let batch = [(0, leaf)];
-            let result = self.evaluate(&batch)?.pop().expect("one prediction");
-            let [(_, leaf)] = batch;
+            let result = self
+                .evaluate(vec![leaf.input()])?
+                .pop()
+                .expect("one prediction");
             search.evaluate(leaf, result.value, result.draw, &result.priors);
         }
         Ok(search.visits().collect())

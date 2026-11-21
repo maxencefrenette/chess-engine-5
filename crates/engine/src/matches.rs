@@ -1,8 +1,8 @@
 use std::{
-    collections::BTreeMap,
     io,
-    num::{NonZeroU16, NonZeroU32},
+    num::{NonZeroU16, NonZeroU32, NonZeroUsize},
     path::PathBuf,
+    sync::Mutex,
     time::{Duration, Instant},
 };
 
@@ -11,11 +11,14 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::{
     chess::{Color, Game, Outcome},
-    mcts::{Leaf, Search},
+    mcts::Search,
     model_evaluator::ModelEvaluator,
     settings::Settings,
     sprt,
 };
+
+mod search;
+use search::{Group, Work};
 
 struct ActiveGame {
     id: u64,
@@ -72,6 +75,7 @@ pub struct Options {
     #[range(min = 0.0)]
     pub loss_stddev: f64,
     batch: u16,
+    search_threads: NonZeroUsize,
     leaves_per_game: NonZeroU16,
     baseline_visits_per_move: NonZeroU32,
     max_pairs: u64,
@@ -116,21 +120,25 @@ fn time_matched_visits(
             continue;
         };
         game.play_legal(leaf.moves[rng.random_range(0..leaf.moves.len())]);
-        batch.push((batch.len(), leaf));
+        batch.push(leaf);
     }
 
+    let measure = |player: &ModelEvaluator| -> io::Result<Duration> {
+        let inputs = batch.iter().map(|leaf| leaf.input()).collect();
+        let start = Instant::now();
+        player.evaluate(inputs)?;
+        Ok(start.elapsed())
+    };
     for _ in 0..4 {
         for player in players {
-            player.evaluate(&batch)?;
+            measure(player)?;
         }
     }
     let mut timings = [[Duration::ZERO; 2]; SAMPLES];
     for (sample, timing) in timings.iter_mut().enumerate() {
         for offset in 0..2 {
             let side = (sample + offset) % 2;
-            let start = Instant::now();
-            players[side].evaluate(&batch)?;
-            timing[side] = start.elapsed();
+            timing[side] = measure(players[side])?;
         }
     }
     let [baseline, candidate] = [0, 1].map(|side| {
@@ -235,19 +243,21 @@ pub fn run(
         options.opening_book,
         openings.len()
     );
-    let benchmark_batch = usize::from(options.batch) * usize::from(options.leaves_per_game.get());
+    let limit = 2 * options.max_pairs;
+    let slots = u64::from(options.batch).min(limit) as usize;
+    // Benchmark a full worker group. The queue can combine several ready groups.
+    let games_per_group = slots.div_ceil(options.search_threads.get()).div_ceil(2);
+    let benchmark_batch = games_per_group * usize::from(options.leaves_per_game.get());
     let visits = time_matched_visits(
         players,
         benchmark_batch,
         options.baseline_visits_per_move,
         matched_speed,
     )?;
-    let mut limit = 2 * options.max_pairs;
-    let mut next_id = u64::from(options.batch).min(limit);
-    let mut active: Vec<_> = (0..next_id)
-        .map(|id| ActiveGame::new(id, &openings))
-        .collect();
-    let mut results = BTreeMap::new();
+    let mut work = Mutex::new(Work {
+        ids: 0..limit,
+        results: Default::default(),
+    });
     let mut next_pair = 0;
     let mut counts = [0; 5];
     let mut wdl = [0; 3];
@@ -270,38 +280,12 @@ pub fn run(
         options.seed
     );
 
-    'games: while !active.is_empty() {
-        let mut pending: [Vec<(usize, Leaf)>; 2] = [Vec::new(), Vec::new()];
-        let mut finished = Vec::new();
-        for (i, slot) in active.iter_mut().enumerate() {
-            let side = slot.player();
-            let batch = &mut pending[side];
-            let collected = slot.search.collect_leaves(
-                &slot.game,
-                visits[side],
-                settings.exploration,
-                usize::from(options.leaves_per_game.get()),
-                |leaf| batch.push((i, leaf)),
-            );
-            if collected == 0
-                && let Some(outcome) = slot.play()
-            {
-                let points = match outcome {
-                    Outcome::Win(color) if color == slot.candidate_color() => 2,
-                    Outcome::Win(_) => 0,
-                    Outcome::Draw => 1,
-                };
-                results.insert(slot.id, points);
-                finished.push(i);
-            }
-        }
-
-        while let (Some(&first), Some(&second)) = (
-            results.get(&(2 * next_pair)),
-            results.get(&(2 * next_pair + 1)),
-        ) {
-            results.remove(&(2 * next_pair));
-            results.remove(&(2 * next_pair + 1));
+    let mut accepted = None;
+    let mut score = |work: &mut Work| -> io::Result<bool> {
+        while accepted.is_none() && next_pair < work.ids.end / 2 {
+            let Some([first, second]) = work.take_pair(next_pair) else {
+                return Ok(false);
+            };
             counts[first + second] += 1;
             wdl[2 - first] += 1;
             wdl[2 - second] += 1;
@@ -335,36 +319,44 @@ pub fn run(
                     println!("gainer passed at pair {next_pair}; continuing to {pass_floor} pairs");
                     early_pass = Some((next_pair, nelo));
                     sprt = None;
-                    limit = 2 * pass_floor;
+                    work.ids.end = 2 * pass_floor;
                 } else {
-                    println!(
-                        "accepted {hypothesis} ({nelo:+} nElo); largest inference batches (baseline/candidate)={max_batches:?}"
-                    );
-                    return Ok(());
+                    accepted = Some((hypothesis, nelo));
                 }
             }
-            if next_pair == limit / 2 {
-                break 'games;
-            }
         }
-
-        for (side, batch) in pending.into_iter().enumerate() {
-            max_batches[side] = max_batches[side].max(batch.len());
-            let evaluations = players[side].evaluate(&batch)?;
-            for ((slot, leaf), result) in batch.into_iter().zip(evaluations) {
-                active[slot]
-                    .search
-                    .evaluate(leaf, result.value, result.draw, &result.priors);
+        Ok(true)
+    };
+    crate::inference_queue::run(
+        slots,
+        options.search_threads,
+        |n| Group::new(n, &work, &openings),
+        |group, predictions| {
+            group.advance(
+                predictions,
+                &work,
+                &openings,
+                visits,
+                settings.exploration,
+                options.leaves_per_game,
+            )
+        },
+        |side, inputs| {
+            if score(&mut work.lock().unwrap())? {
+                return Ok(None);
             }
-        }
-        for i in finished.into_iter().rev() {
-            if next_id < limit {
-                active[i] = ActiveGame::new(next_id, &openings);
-                next_id += 1;
-            } else {
-                active.swap_remove(i);
-            }
-        }
+            max_batches[side] = max_batches[side].max(inputs.len());
+            players[side].evaluate(inputs).map(Some)
+        },
+    )?;
+    if !score(work.get_mut().unwrap())? {
+        return Err(io::Error::other("match ended with incomplete game pairs"));
+    }
+    if let Some((hypothesis, nelo)) = accepted {
+        println!(
+            "accepted {hypothesis} ({nelo:+} nElo); largest inference batches (baseline/candidate)={max_batches:?}"
+        );
+        return Ok(());
     }
     let status = if let Some((pair, nelo)) = early_pass {
         format!("accepted H1 ({nelo:+} nElo) at pair {pair}")

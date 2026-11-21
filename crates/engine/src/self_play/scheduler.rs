@@ -1,9 +1,4 @@
-use std::{
-    io,
-    ops::Range,
-    sync::{Mutex, mpsc},
-    thread,
-};
+use std::{io, ops::Range, sync::Mutex};
 
 use chess_network::inference::Prediction;
 
@@ -68,99 +63,19 @@ impl Group {
                 }
             }
             if !self.leaves.is_empty() {
-                return Some(
-                    self.leaves
-                        .iter()
-                        .map(|(_, leaf)| (leaf.board_input(), leaf.packed_moves().collect()))
-                        .collect(),
-                );
+                return Some(self.leaves.iter().map(|(_, leaf)| leaf.input()).collect());
             }
         }
     }
-}
-
-struct Request {
-    worker: usize,
-    group: usize,
-    inputs: Vec<Input>,
-}
-
-type Reply = (usize, Vec<Prediction>);
-
-fn search(
-    worker: usize,
-    mut groups: Vec<Group>,
-    shard: &Shard,
-    ready: mpsc::SyncSender<Request>,
-    replies: mpsc::Receiver<Reply>,
-) -> Vec<(usize, PlayedGame)> {
-    // Prime both groups. While one waits for inference, the worker can advance the other.
-    let mut live = groups.len();
-    let mut initial = 0..live;
-    while live > 0 {
-        let (group, predictions) = if let Some(i) = initial.next() {
-            (i, Vec::new())
-        } else if let Ok(reply) = replies.recv() {
-            reply
-        } else {
-            break;
-        };
-        if let Some(inputs) = groups[group].advance(predictions, shard) {
-            if ready
-                .send(Request {
-                    worker,
-                    group,
-                    inputs,
-                })
-                .is_err()
-            {
-                break;
-            }
-        } else {
-            live -= 1;
-        }
-    }
-    groups
-        .into_iter()
-        .flat_map(|group| group.completed)
-        .collect()
-}
-
-fn infer(
-    ready: mpsc::Receiver<Request>,
-    replies: Vec<mpsc::Sender<Reply>>,
-    mut evaluate: impl FnMut(Vec<Input>) -> io::Result<Vec<Prediction>>,
-) -> io::Result<()> {
-    while let Ok(first) = ready.recv() {
-        let mut inputs = first.inputs;
-        let mut tickets = vec![(first.worker, first.group, inputs.len())];
-        for request in ready.try_iter() {
-            tickets.push((request.worker, request.group, request.inputs.len()));
-            inputs.extend(request.inputs);
-        }
-        let count = inputs.len();
-        let predictions = evaluate(inputs)?;
-        if predictions.len() != count {
-            return Err(io::Error::other("expected one prediction per leaf"));
-        }
-        let mut predictions = predictions.into_iter();
-        for (worker, group, n) in tickets {
-            replies[worker]
-                .send((group, predictions.by_ref().take(n).collect()))
-                .map_err(|_| io::Error::other("search worker stopped"))?;
-        }
-    }
-    Ok(())
 }
 
 pub(super) fn play_games(
     settings: &Settings,
     config: &Config,
-    mut ids: Range<usize>,
-    evaluate: impl FnMut(Vec<Input>) -> io::Result<Vec<Prediction>>,
+    ids: Range<usize>,
+    mut evaluate: impl FnMut(Vec<Input>) -> io::Result<Vec<Prediction>>,
 ) -> io::Result<Vec<(usize, PlayedGame)>> {
     let slots = config.batch.get().min(ids.len());
-    let workers = config.search_threads.get().min(slots);
     let (fast_visits, full_search_rate) = match config.playout_cap {
         PlayoutCap::Disabled {} => (config.visits_per_move, 1.0),
         PlayoutCap::Enabled {
@@ -168,23 +83,6 @@ pub(super) fn play_games(
             full_search_rate,
         } => (fast_visits, full_search_rate),
     };
-    let groups: Vec<_> = (0..workers)
-        .map(|worker| {
-            let size = slots / workers + usize::from(worker < slots % workers);
-            [size.div_ceil(2), size / 2]
-                .into_iter()
-                .filter(|&n| n > 0)
-                .map(|n| Group {
-                    active: ids
-                        .by_ref()
-                        .take(n)
-                        .map(|id| ActiveGame::new(config.seed, id, full_search_rate))
-                        .collect(),
-                    ..Group::default()
-                })
-                .collect()
-        })
-        .collect();
     let shard = Shard {
         settings,
         config,
@@ -192,24 +90,27 @@ pub(super) fn play_games(
         full_search_rate,
         remaining: Mutex::new(ids),
     };
-    thread::scope(|scope| {
-        let (ready, requests) = mpsc::sync_channel(workers.saturating_mul(2).min(slots));
-        let mut senders = Vec::new();
-        let mut handles = Vec::new();
-        for (i, owned) in groups.into_iter().enumerate() {
-            let (tx, rx) = mpsc::channel();
-            senders.push(tx);
-            let (shard, ready) = (&shard, ready.clone());
-            handles.push(scope.spawn(move || search(i, owned, shard, ready, rx)));
-        }
-        drop(ready);
-        // infer owns the channels. An inference error wakes every blocked worker before joining.
-        infer(requests, senders, evaluate)?;
-        let mut games = Vec::new();
-        for worker in handles {
-            games.extend(worker.join().expect("self-play worker panicked"));
-        }
-        games.sort_unstable_by_key(|(id, _)| *id);
-        Ok(games)
-    })
+    let groups = crate::inference_queue::run(
+        slots,
+        config.search_threads,
+        |n| Group {
+            active: shard
+                .remaining
+                .lock()
+                .unwrap()
+                .by_ref()
+                .take(n)
+                .map(|id| ActiveGame::new(config.seed, id, full_search_rate))
+                .collect(),
+            ..Group::default()
+        },
+        |group, predictions| group.advance(predictions, &shard).map(|inputs| (0, inputs)),
+        |_, inputs| evaluate(inputs).map(Some),
+    )?;
+    let mut games: Vec<_> = groups
+        .into_iter()
+        .flat_map(|group| group.completed)
+        .collect();
+    games.sort_unstable_by_key(|(id, _)| *id);
+    Ok(games)
 }
