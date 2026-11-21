@@ -10,8 +10,8 @@ value_loss_weight = 0.6
 value_rescoring = { mode = "disabled" }
 
 [[curriculum]]
-dataset = "/data/chess/chess-engine-5/models/day-2026.11.20/self-play-refresh/fresh-data/v4/1795208513662943708-2112136"
-num_positions = 379600
+dataset = "/data/chess/chess-engine-5/training-data/v4/1795227141826062517-2262224"
+num_positions = 766500
 epochs = 15.0
 
 [optimizer]
