@@ -17,6 +17,7 @@ use crate::{
     sprt,
 };
 
+pub mod gauntlet;
 mod search;
 use search::{Group, Work};
 
@@ -219,21 +220,22 @@ pub fn run(
     players: [&ModelEvaluator; 2],
     settings: [Settings; 2],
 ) -> io::Result<()> {
+    let openings = load_openings(&options)?;
+    play(&options, &openings, mode, matched_speed, players, settings)?;
+    Ok(())
+}
+
+struct MatchResult {
+    wdl: [u64; 3],
+    counts: [u64; 5],
+    candidate_visits: NonZeroU32,
+}
+
+fn load_openings(options: &Options) -> io::Result<Vec<Game>> {
     if options.batch == 0 || options.max_pairs == 0 || options.max_pairs > u64::MAX / 2 {
         return Err(io::Error::other(
             "batch must be positive and max pairs must be positive and fit twice in u64",
         ));
-    }
-    let (mut sprt, pass_floor) = match mode {
-        Mode::Gainer => (
-            Some(options.sprt.gainer),
-            options.min_passed_gainer_pairs.min(options.max_pairs),
-        ),
-        Mode::NonRegression => (Some(options.sprt.non_regression), 0),
-        Mode::Fixed => (None, 0),
-    };
-    if sprt.as_ref().is_some_and(|sprt| !sprt.validate()) {
-        return Err(io::Error::other("invalid SPRT nElo bounds or error rates"));
     }
     let openings = chess_opening_book::load(
         &options.opening_book,
@@ -255,6 +257,28 @@ pub fn run(
         options.opening_book,
         openings.len()
     );
+    Ok(openings)
+}
+
+fn play(
+    options: &Options,
+    openings: &[Game],
+    mode: Mode,
+    matched_speed: bool,
+    players: [&ModelEvaluator; 2],
+    settings: [Settings; 2],
+) -> io::Result<MatchResult> {
+    let (mut sprt, pass_floor) = match mode {
+        Mode::Gainer => (
+            Some(&options.sprt.gainer),
+            options.min_passed_gainer_pairs.min(options.max_pairs),
+        ),
+        Mode::NonRegression => (Some(&options.sprt.non_regression), 0),
+        Mode::Fixed => (None, 0),
+    };
+    if sprt.as_ref().is_some_and(|sprt| !sprt.validate()) {
+        return Err(io::Error::other("invalid SPRT nElo bounds or error rates"));
+    }
     let limit = 2 * options.max_pairs;
     let slots = u64::from(options.batch).min(limit) as usize;
     // Benchmark a full worker group. The queue can combine several ready groups.
@@ -333,7 +357,7 @@ pub fn run(
                 };
                 println!(
                     "pairs={next_pair} candidate W/D/L={wdl:?} nElo={} pentanomial={counts:?}{evidence}",
-                    nelo_summary(counts, sprt.as_ref())
+                    nelo_summary(counts, sprt)
                 );
             }
             if let Some((hypothesis, nelo)) = decision {
@@ -352,12 +376,12 @@ pub fn run(
     crate::inference_queue::run(
         slots,
         options.search_threads,
-        |n| Group::new(n, &work, &openings),
+        |n| Group::new(n, &work, openings),
         |group, predictions| {
             group.advance(
                 predictions,
                 &work,
-                &openings,
+                openings,
                 visits,
                 &settings,
                 options.leaves_per_game,
@@ -374,11 +398,16 @@ pub fn run(
     if !score(work.get_mut().unwrap())? {
         return Err(io::Error::other("match ended with incomplete game pairs"));
     }
+    let result = MatchResult {
+        wdl,
+        counts,
+        candidate_visits: visits[1],
+    };
     if let Some((hypothesis, nelo)) = accepted {
         println!(
             "accepted {hypothesis} ({nelo:+} nElo); largest inference batches (baseline/candidate)={max_batches:?}"
         );
-        return Ok(());
+        return Ok(result);
     }
     let status = if let Some((pair, nelo)) = early_pass {
         format!("accepted H1 ({nelo:+} nElo) at pair {pair}")
@@ -394,9 +423,9 @@ pub fn run(
     };
     println!(
         "{status}: pairs={next_pair} candidate W/D/L={wdl:?} nElo={} pentanomial={counts:?}{evidence}; largest inference batches (baseline/candidate)={max_batches:?}",
-        nelo_summary(counts, sprt.as_ref())
+        nelo_summary(counts, sprt)
     );
-    Ok(())
+    Ok(result)
 }
 
 #[cfg(test)]

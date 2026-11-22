@@ -1,8 +1,25 @@
-use std::{error::Error, fs};
+use std::{error::Error, fs, marker::PhantomData};
 
 pub use chess_config_derive::{TomlConfig, toml_config};
 use serde::de::DeserializeOwned;
 use toml::{Table, Value};
+
+/// A TOML table that replaces the supplied fields of a baseline config.
+#[derive(serde::Deserialize)]
+#[serde(transparent)]
+pub struct PartialConfig<T> {
+    fields: Table,
+    #[serde(skip)]
+    config_type: PhantomData<T>,
+}
+
+impl<T: TomlConfig + serde::Serialize> PartialConfig<T> {
+    pub fn apply(self, baseline: &T) -> Result<T, Box<dyn Error>> {
+        let mut fields = Table::try_from(baseline)?;
+        fields.extend(self.fields);
+        Ok(fields.try_into()?)
+    }
+}
 
 pub fn repo_config_path(name: &str) -> String {
     format!("{}/../../config/{name}", env!("CARGO_MANIFEST_DIR"))

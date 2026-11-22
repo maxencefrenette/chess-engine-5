@@ -3,7 +3,7 @@ use std::{env, path::Path, process::ExitCode};
 use chess_config::{DeviceConfig, TomlConfig, repo_config_path};
 use chess_engine::{
     chess::Game,
-    matches::{self, Mode, Options},
+    matches::{self, Mode, Options, gauntlet::Gauntlet},
     model_evaluator::ModelEvaluator,
     self_play,
     settings::Settings,
@@ -13,7 +13,9 @@ const USAGE: &str = "usage: chess-engine [--cuda] <command>
   search MODEL_DIR VISITS [MOVE ...]
   self-play [--config PATH] [--set KEY=VALUE]...
   eval-model <gainer|non-regression|fixed> CANDIDATE_DIR [--matched-speed] [--config PATH] [--set KEY=VALUE]...
-  eval-search <gainer|non-regression|fixed> [--config PATH] [--set candidate.KEY=VALUE] [--set KEY=VALUE]...";
+  eval-search <gainer|non-regression|fixed> [--config PATH] [--set candidate.KEY=VALUE] [--set KEY=VALUE]...
+  eval-model gauntlet PLAN.toml [--matched-speed] [--config PATH] [--set KEY=VALUE]...
+  eval-search gauntlet PLAN.toml [--config PATH] [--set KEY=VALUE]...";
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
@@ -24,13 +26,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         (DeviceConfig::Cpu, first)
     };
     if matches!(command.as_str(), "eval-model" | "eval-search") && device == DeviceConfig::Cpu {
+        let settings = Settings::load()?;
         let mode = match args.next().as_deref() {
+            Some("gauntlet") => {
+                let path = args
+                    .next()
+                    .filter(|arg| !arg.starts_with("--"))
+                    .ok_or(USAGE)?;
+                if command == "eval-search" {
+                    let plan = Gauntlet::search(&path, settings)?;
+                    let options = Options::load(&repo_config_path("eval-model.toml"), args)?;
+                    return plan.run(options, settings, false);
+                }
+                let plan = Gauntlet::models(&path)?;
+                let (options, matched_speed) = eval_options(args)?;
+                return plan.run(options, settings, matched_speed);
+            }
             Some("gainer") => Mode::Gainer,
             Some("non-regression") => Mode::NonRegression,
             Some("fixed") => Mode::Fixed,
             _ => return Err(USAGE.into()),
         };
-        let settings = Settings::load()?;
         if command == "eval-search" {
             let (options, candidate_settings) = search_options(args)?;
             let model = ModelEvaluator::load(&options.baseline_dir, options.device)?;

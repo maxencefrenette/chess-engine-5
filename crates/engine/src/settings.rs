@@ -3,7 +3,7 @@ use std::error::Error;
 use chess_config::TomlConfig;
 
 #[chess_config::toml_config]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize)]
 pub struct Settings {
     #[range(min = 0.0)]
     pub exploration: f32,

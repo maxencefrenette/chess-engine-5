@@ -81,3 +81,20 @@ fn f32_ranges_reject_overflow_and_nonfinite_values() -> Result<(), Box<dyn std::
     }
     Ok(())
 }
+
+#[test]
+fn partial_configs_inherit_omitted_fields_and_validate_overrides()
+-> Result<(), Box<dyn std::error::Error>> {
+    let baseline: Settings = toml::from_str("value = 0.5\n[mode]\nkind = 'enabled'\nvalue = 1.0")?;
+    let apply = |source: &str| {
+        toml::from_str::<chess_config::PartialConfig<Settings>>(source)?.apply(&baseline)
+    };
+    let changed = apply("value = 0.75")?;
+    assert_eq!(changed.value, 0.75);
+    assert!(matches!(changed.mode, Mode::Enabled { value: 1.0 }));
+    assert_eq!(apply("")?.value, 0.5);
+    for invalid in ["unknown = true", "value = 'wrong type'", "value = -1.0"] {
+        assert!(apply(invalid).is_err());
+    }
+    Ok(())
+}

@@ -17,7 +17,9 @@ Every training run is subject to a budget of 60min. It is defined as the time to
 
 ## Sweeps
 
-Treat a sweep as one experiment. Start all variants from the same baseline settings and select only the most promising candidate for the match.
+Treat a sweep as one experiment. Start all variants from the same baseline settings and select the most promising candidate for the promotion match.
+
+Use a gauntlet to compare multiple candidates by their estimated nElo against a common baseline. Run `mise run eval-model -- gauntlet PLAN.toml` for checkpoints or `mise run eval-search -- gauntlet PLAN.toml` for search settings.
 
 ## Experiment Types
 
