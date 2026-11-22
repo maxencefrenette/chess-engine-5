@@ -1,0 +1,17 @@
+pairs = 1000
+
+[[candidates]]
+name = "1.0"
+settings = { exploration = 1.0 }
+
+[[candidates]]
+name = "1.2"
+settings = { exploration = 1.2 }
+
+[[candidates]]
+name = "1.6"
+settings = { exploration = 1.6 }
+
+[[candidates]]
+name = "1.8"
+settings = { exploration = 1.8 }
