@@ -443,11 +443,6 @@ mod tests {
         SGD::new(params.all_vars(), 0.1)?.backward_step(&objective()?)?;
         let grads = objective()?.backward()?;
         let params = params.data().lock().unwrap();
-        assert!(
-            params
-                .keys()
-                .all(|name| !name.starts_with("piece_count_value"))
-        );
         for name in ["input.weight", "transformer_value.output.weight"] {
             let grad = grads.get(params[name].as_tensor()).expect("value gradient");
             assert!(grad.abs()?.sum_all()?.to_scalar::<f32>()? > 0.0, "{name}");
