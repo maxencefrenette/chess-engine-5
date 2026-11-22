@@ -1,43 +1,141 @@
-//! Shared SVG charts for experiment reports.
-mod panels;
+//! Dedicated SVG charts for experiment reports.
 mod style;
-pub use panels::{LinePanel, line_panels};
 
 use std::{error::Error, ops::Range, path::Path};
 
-use plotters::{coord::Shift, prelude::*};
+use chess_config::TomlConfig;
+use plotters::{
+    prelude::*,
+    style::text_anchor::{HPos, Pos, VPos},
+};
+use serde::Deserialize;
+use style::{FONT, INK, LINE_WIDTH, color, frame};
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-use style::{FONT, INK, LEGEND_BORDER, LINE_WIDTH, MARKER_RADIUS, color, frame};
-
-pub struct Series {
-    pub label: String,
-    pub points: Vec<(f64, f64)>,
-}
-
-pub struct Estimate {
-    pub label: String,
-    pub nelo: f64,
-    pub lower: f64,
-    pub upper: f64,
-}
-
-pub struct SweepPoint {
+#[derive(Deserialize)]
+pub struct NumericNelo {
     pub x: f64,
     pub nelo: f64,
     pub lower: f64,
     pub upper: f64,
 }
 
-fn valid_estimate(nelo: f64, lower: f64, upper: f64) -> bool {
-    [nelo, lower, upper].iter().all(|v| v.is_finite()) && lower <= nelo && nelo <= upper
+#[derive(Deserialize)]
+pub struct CategoricalNelo {
+    pub label: String,
+    pub nelo: f64,
+    pub lower: f64,
+    pub upper: f64,
 }
 
-fn canvas(path: &Path, height: u32) -> Result<DrawingArea<SVGBackend<'_>, Shift>> {
-    let root = SVGBackend::new(path, (720, height)).into_drawing_area();
-    root.fill(&WHITE)?;
-    Ok(root)
+#[derive(Deserialize)]
+pub struct NumericLoss {
+    pub x: f64,
+    pub loss: f64,
+}
+
+#[derive(Deserialize)]
+pub struct CategoricalLoss {
+    pub label: String,
+    pub loss: f64,
+}
+
+pub fn nelo_numeric(path: &Path, x_label: &str, rows: &[NumericNelo]) -> Result<()> {
+    let points = rows
+        .iter()
+        .map(|r| Point::nelo(r.x, r.nelo, r.lower, r.upper))
+        .collect();
+    draw(path, x_label, Metric::Nelo, Axis::Numeric, points)
+}
+
+pub fn nelo_categorical(path: &Path, x_label: &str, rows: &[CategoricalNelo]) -> Result<()> {
+    let labels = rows.iter().map(|r| r.label.as_str()).collect();
+    let points = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| Point::nelo(i as f64, r.nelo, r.lower, r.upper))
+        .collect();
+    draw(
+        path,
+        x_label,
+        Metric::Nelo,
+        Axis::Categories(labels),
+        points,
+    )
+}
+
+#[derive(Deserialize, TomlConfig)]
+struct LossCalibration {
+    loss_stddev: f64,
+}
+
+fn loss_margin() -> Result<f64> {
+    let calibration = LossCalibration::from_repo_file("eval-model.toml")?;
+    if !calibration.loss_stddev.is_finite() || calibration.loss_stddev < 0.0 {
+        return Err("loss_stddev must be finite and nonnegative".into());
+    }
+    // Normal approximation for one training run at each point.
+    Ok(1.96 * calibration.loss_stddev)
+}
+
+pub fn loss_numeric(path: &Path, x_label: &str, rows: &[NumericLoss]) -> Result<()> {
+    let margin = loss_margin()?;
+    let points = rows
+        .iter()
+        .map(|r| Point::loss(r.x, r.loss, margin))
+        .collect();
+    draw(path, x_label, Metric::Loss, Axis::Numeric, points)
+}
+
+pub fn loss_categorical(path: &Path, x_label: &str, rows: &[CategoricalLoss]) -> Result<()> {
+    let margin = loss_margin()?;
+    let labels = rows.iter().map(|r| r.label.as_str()).collect();
+    let points = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| Point::loss(i as f64, r.loss, margin))
+        .collect();
+    draw(
+        path,
+        x_label,
+        Metric::Loss,
+        Axis::Categories(labels),
+        points,
+    )
+}
+
+struct Point {
+    x: f64,
+    y: f64,
+    lower: f64,
+    upper: f64,
+}
+
+impl Point {
+    fn nelo(x: f64, y: f64, lower: f64, upper: f64) -> Self {
+        Self { x, y, lower, upper }
+    }
+
+    fn loss(x: f64, y: f64, margin: f64) -> Self {
+        Self {
+            x,
+            y,
+            lower: y - margin,
+            upper: y + margin,
+        }
+    }
+}
+
+enum Axis<'a> {
+    Numeric,
+    Categories(Vec<&'a str>),
+}
+
+#[derive(PartialEq)]
+enum Metric {
+    Loss,
+    Nelo,
 }
 
 fn range(values: impl Iterator<Item = f64>) -> Result<Range<f64>> {
@@ -50,188 +148,133 @@ fn range(values: impl Iterator<Item = f64>) -> Result<Range<f64>> {
         min = min.min(value);
         max = max.max(value);
     }
-    if min > max {
-        return Err("chart needs at least one point".into());
-    }
     let padding = if min == max {
         min.abs().max(1.0) * 0.05
     } else {
         (max - min) * 0.05
     };
-    Ok(min - padding..max + padding)
+    let bounds = min - padding..max + padding;
+    if !(bounds.end - bounds.start).is_finite() {
+        return Err("chart values exceed the axis range".into());
+    }
+    Ok(bounds)
 }
 
-/// Draw unsmoothed curves with a shared palette, typography, and legend.
-pub fn lines(
+fn draw(
     path: &Path,
-    title: &str,
     x_label: &str,
-    y_label: &str,
-    series: &[Series],
+    metric: Metric,
+    axis: Axis,
+    mut points: Vec<Point>,
 ) -> Result<()> {
-    if series.is_empty() || series.iter().any(|s| s.points.is_empty()) {
-        return Err("each series needs at least one point".into());
+    if points.is_empty() {
+        return Err("chart needs at least one point".into());
     }
-    let x = range(series.iter().flat_map(|s| s.points.iter().map(|p| p.0)))?;
-    let y = range(series.iter().flat_map(|s| s.points.iter().map(|p| p.1)))?;
-    let root = canvas(path, 420)?;
+    for point in &points {
+        if !(point.lower <= point.y && point.y <= point.upper) {
+            return Err("expected lower <= estimate <= upper".into());
+        }
+    }
+    let zero = (metric == Metric::Nelo).then_some(0.0);
+    let y = range(points.iter().flat_map(|p| [p.lower, p.upper]).chain(zero))?;
+
+    let numeric = matches!(axis, Axis::Numeric);
+    let (x, width, ticks) = match axis {
+        Axis::Numeric => {
+            let x = range(points.iter().map(|p| p.x))?;
+            points.sort_by(|a, b| a.x.total_cmp(&b.x));
+            let mut ticks: Vec<_> = points.iter().map(|p| (p.x, p.x.to_string())).collect();
+            ticks.dedup_by(|a, b| a.0 == b.0);
+            // Fall back to evenly spaced numeric ticks when observed values would overlap.
+            if ticks.array_windows().any(|[(a, first), (b, second)]| {
+                (b - a) / (x.end - x.start) * 600.0
+                    < (first.len() + second.len()) as f64 * 4.5 + 8.0
+            }) {
+                ticks.clear();
+            }
+            (x, 720, ticks)
+        }
+        Axis::Categories(labels) => {
+            if labels.iter().any(|s| s.trim().is_empty()) {
+                return Err("category labels must not be empty".into());
+            }
+            let longest = labels.iter().map(|s| s.chars().count()).max().unwrap_or(0);
+            let width = u32::try_from((120 + labels.len() * (9 * longest + 24)).max(720))?;
+            let x = -0.5..labels.len() as f64 - 0.5;
+            let ticks = labels
+                .into_iter()
+                .enumerate()
+                .map(|(i, s)| (i as f64, s.to_owned()))
+                .collect();
+            (x, width, ticks)
+        }
+    };
+
+    let (name, y_label) = match metric {
+        Metric::Nelo => ("nElo", "nElo (95% CI)"),
+        Metric::Loss => ("Loss", "Loss (95% CI)"),
+    };
+    let root = SVGBackend::new(path, (width, 420)).into_drawing_area();
+    root.fill(&WHITE)?;
     let mut chart = ChartBuilder::on(&root)
-        .caption(title, (FONT, 20).into_font().color(&INK))
+        .caption(
+            format!("{name} vs {x_label}"),
+            (FONT, 20).into_font().color(&INK),
+        )
         .margin(24)
         .x_label_area_size(48)
         .y_label_area_size(72)
-        .build_cartesian_2d(x, y)?;
-    chart
-        .configure_mesh()
-        .x_desc(x_label)
+        .build_cartesian_2d(x.clone(), y.clone())?;
+    let mut mesh = chart.configure_mesh();
+    if !ticks.is_empty() {
+        mesh.x_labels(0);
+    }
+    mesh.x_desc(x_label)
         .y_desc(y_label)
         .label_style((FONT, 15).into_font().color(&INK))
         .axis_desc_style((FONT, 17).into_font().color(&INK))
         .axis_style(INK)
         .disable_mesh()
         .draw()?;
-    for (i, item) in series.iter().enumerate() {
-        let color = color(i, series.len());
-        chart
-            .draw_series(LineSeries::new(
-                item.points.iter().copied(),
-                color.stroke_width(LINE_WIDTH),
-            ))?
-            .label(&item.label)
-            .legend(move |(x, y)| {
-                PathElement::new([(x, y), (x + 24, y)], color.stroke_width(LINE_WIDTH))
-            });
-        if item.points.len() <= 100 {
-            chart.draw_series(
-                item.points
-                    .iter()
-                    .map(|&p| Circle::new(p, MARKER_RADIUS, color.filled())),
-            )?;
-        }
-    }
-    chart
-        .configure_series_labels()
-        .background_style(WHITE)
-        .border_style(LEGEND_BORDER)
-        .label_font((FONT, 15))
-        .draw()?;
-    frame(&root, chart.plotting_area())?;
-    root.present()?;
-    Ok(())
-}
-
-/// Plot supplied nElo estimates and 95% CIs; statistical calculations stay outside this crate.
-pub fn nelo(path: &Path, title: &str, estimates: &[Estimate]) -> Result<()> {
-    if estimates.is_empty()
-        || estimates
-            .iter()
-            .any(|e| !valid_estimate(e.nelo, e.lower, e.upper))
-    {
-        return Err("expected finite estimates with lower <= nelo <= upper".into());
-    }
-    let x = range(std::iter::once(0.0).chain(estimates.iter().flat_map(|e| [e.lower, e.upper])))?;
-    let root = canvas(path, (160 + estimates.len() as u32 * 48).max(300))?;
-    let mut chart = ChartBuilder::on(&root)
-        .caption(title, (FONT, 20).into_font().color(&INK))
-        .margin(24)
-        .x_label_area_size(48)
-        .y_label_area_size(180)
-        .build_cartesian_2d(x, -0.5..estimates.len() as f64 - 0.5)?;
-    chart
-        .configure_mesh()
-        .x_desc("nElo (95% CI)")
-        .y_labels(0)
-        .label_style((FONT, 15).into_font().color(&INK))
-        .axis_desc_style((FONT, 17).into_font().color(&INK))
-        .axis_style(INK)
-        .disable_mesh()
-        .draw()?;
-    chart.draw_series(std::iter::once(PathElement::new(
-        [(0.0, -0.5), (0.0, estimates.len() as f64 - 0.5)],
-        INK.mix(0.4),
-    )))?;
-    for (i, estimate) in estimates.iter().enumerate() {
-        let y = (estimates.len() - i - 1) as f64;
-        let color = color(i, estimates.len());
-        chart.draw_series([
-            PathElement::new(
-                [(estimate.lower, y), (estimate.upper, y)],
-                color.stroke_width(LINE_WIDTH),
-            ),
-            PathElement::new(
-                [(estimate.lower, y - 0.1), (estimate.lower, y + 0.1)],
-                color.stroke_width(LINE_WIDTH),
-            ),
-            PathElement::new(
-                [(estimate.upper, y - 0.1), (estimate.upper, y + 0.1)],
-                color.stroke_width(LINE_WIDTH),
-            ),
-        ])?;
-        chart.draw_series(std::iter::once(Circle::new(
-            (estimate.nelo, y),
-            MARKER_RADIUS,
-            color.filled(),
-        )))?;
-        let (_, pixel_y) = chart.backend_coord(&(estimate.nelo, y));
+    for (value, label) in ticks {
+        let (px, py) = chart.backend_coord(&(value, y.start));
+        root.draw(&PathElement::new([(px, py), (px, py - 4)], INK))?;
         root.draw(&Text::new(
-            estimate.label.as_str(),
-            (24, pixel_y - 7),
-            (FONT, 15).into_font().color(&INK),
+            label,
+            (px, py + 8),
+            (FONT, 15)
+                .into_font()
+                .color(&INK)
+                .pos(Pos::new(HPos::Center, VPos::Top)),
         ))?;
     }
-    frame(&root, chart.plotting_area())?;
-    root.present()?;
-    Ok(())
-}
-
-/// Numeric sweep with supplied 95% CI endpoints. Connect points in x order without fitting.
-pub fn sweep(path: &Path, title: &str, x_label: &str, points: &[SweepPoint]) -> Result<()> {
-    if points.is_empty()
-        || points
-            .iter()
-            .any(|p| !p.x.is_finite() || !valid_estimate(p.nelo, p.lower, p.upper))
-    {
-        return Err("expected finite sweep points with lower <= nelo <= upper".into());
+    if let Some(zero) = zero {
+        chart.draw_series([PathElement::new(
+            [(x.start, zero), (x.end, zero)],
+            INK.mix(0.4),
+        )])?;
     }
-    let mut points: Vec<_> = points.iter().collect();
-    points.sort_by(|a, b| a.x.total_cmp(&b.x));
-    let x = range(points.iter().map(|p| p.x))?;
-    let y = range(std::iter::once(0.0).chain(points.iter().flat_map(|p| [p.lower, p.upper])))?;
-    let root = canvas(path, 420)?;
-    let mut chart = ChartBuilder::on(&root)
-        .caption(title, (FONT, 20).into_font().color(&INK))
-        .margin(24)
-        .x_label_area_size(48)
-        .y_label_area_size(72)
-        .build_cartesian_2d(x.clone(), y)?;
-    chart
-        .configure_mesh()
-        .x_desc(x_label)
-        .y_desc("nElo (95% CI)")
-        .label_style((FONT, 15).into_font().color(&INK))
-        .axis_desc_style((FONT, 17).into_font().color(&INK))
-        .axis_style(INK)
-        .disable_mesh()
-        .draw()?;
-    chart.draw_series(std::iter::once(PathElement::new(
-        [(x.start, 0.0), (x.end, 0.0)],
-        INK.mix(0.4),
-    )))?;
-    let color = color(0, 1);
-    chart.draw_series(LineSeries::new(
-        points.iter().map(|p| (p.x, p.nelo)),
-        color.stroke_width(LINE_WIDTH),
-    ))?;
-    chart.draw_series(points.iter().map(|p| {
-        ErrorBar::new_vertical(
+    if numeric {
+        chart.draw_series(LineSeries::new(
+            points.iter().map(|p| (p.x, p.y)),
+            color(0, 1).stroke_width(LINE_WIDTH),
+        ))?;
+    }
+    for (i, p) in points.iter().enumerate() {
+        let ink = if numeric {
+            color(0, 1)
+        } else {
+            color(i, points.len())
+        };
+        chart.draw_series([ErrorBar::new_vertical(
             p.x,
             p.lower,
-            p.nelo,
+            p.y,
             p.upper,
-            color.filled().stroke_width(LINE_WIDTH),
+            ink.filled().stroke_width(LINE_WIDTH),
             10,
-        )
-    }))?;
+        )])?;
+    }
     frame(&root, chart.plotting_area())?;
     root.present()?;
     Ok(())

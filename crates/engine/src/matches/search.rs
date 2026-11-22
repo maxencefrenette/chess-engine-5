@@ -1,4 +1,4 @@
-use super::{ActiveGame, Outcome, Settings};
+use super::{ActiveGame, Outcome, SearchSettings};
 use crate::{chess::Game, mcts::Leaf, model_evaluator::Input};
 use chess_network::inference::Prediction;
 use std::{
@@ -50,13 +50,19 @@ impl Group {
         work: &Mutex<Work>,
         openings: &[Game],
         visits: [NonZeroU32; 2],
-        settings: &[Settings; 2],
+        settings: &[SearchSettings; 2],
         leaves_per_game: NonZeroU16,
     ) -> Option<(usize, Vec<Input>)> {
         for ((i, leaf), result) in self.pending.drain(..).zip(predictions) {
             let game = self.games[i].as_mut().unwrap();
             let side = game.player();
-            game.searches[side].evaluate(leaf, result.value, result.draw, &result.priors);
+            game.searches[side].evaluate(
+                leaf,
+                result.value,
+                result.draw,
+                &result.priors,
+                settings[side].policy_temperature,
+            );
         }
         // Following the first active game keeps more of the group on the same checkpoint.
         while let Some(first) = self.games.iter().flatten().next() {
@@ -69,7 +75,7 @@ impl Group {
                 let count = game.searches[side].collect_leaves(
                     &game.game,
                     visits[side],
-                    settings[side].exploration,
+                    &settings[side],
                     leaves_per_game.get().into(),
                     |leaf| self.pending.push((i, leaf)),
                 );
@@ -116,15 +122,20 @@ mod tests {
     fn search_settings_and_reused_visits_follow_the_player_across_colors() {
         let openings = [Game::default()];
         let visits = [2, 7].map(|n| NonZeroU32::new(n).unwrap());
+        let control = SearchSettings {
+            exploration: 1.4,
+            reuse_subtree: true,
+            first_play: crate::settings::FirstPlay::Zero {},
+            pending_value: crate::settings::PendingValue::Loss { amount: 1.0 },
+            policy_temperature: 1.0,
+        };
         let settings = [
-            Settings {
+            SearchSettings {
                 exploration: 0.0,
                 reuse_subtree: false,
+                ..control
             },
-            Settings {
-                exploration: 1.4,
-                reuse_subtree: true,
-            },
+            control,
         ];
         for id in 0..2 {
             let work = Mutex::new(Work {

@@ -1,4 +1,4 @@
-model = "/data/chess/chess-engine-5/models/2026.11.21-13-subtree-reuse/candidate"
+model = "/data/chess/chess-engine-5/models/2026.11.21-overnight/epochs-with-reused-search-data/epochs-18"
 output_dir = "/data/chess/chess-engine-5/training-data"
 device = "cuda"
 total_games = 12000
@@ -6,8 +6,14 @@ games_per_shard = 500
 batch = 256
 leaves_per_game = 4
 search_threads = 2
-visits_per_move = 800
-reuse_subtree = true
+visits_per_move = 1000
 seed = 42
 temperature = 1.0
 cooling = { mode = "after", ply = 45, temperature = 0.5 }
+
+[search]
+exploration = 1.4
+reuse_subtree = true
+first_play = { mode = "parent", reduction = 0.15 }
+pending_value = { mode = "loss", amount = 1.0 }
+policy_temperature = 2.0

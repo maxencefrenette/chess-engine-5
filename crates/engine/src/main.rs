@@ -6,7 +6,7 @@ use chess_engine::{
     matches::{self, Mode, Options, gauntlet::Gauntlet},
     model_evaluator::ModelEvaluator,
     self_play,
-    settings::Settings,
+    settings::{EngineConfig, SearchSettings},
 };
 
 const USAGE: &str = "usage: chess-engine [--cuda] <command>
@@ -26,7 +26,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         (DeviceConfig::Cpu, first)
     };
     if matches!(command.as_str(), "eval-model" | "eval-search") && device == DeviceConfig::Cpu {
-        let settings = Settings::load()?;
+        let settings = EngineConfig::from_repo_file("engine.toml")?.search;
         let mode = match args.next().as_deref() {
             Some("gauntlet") => {
                 let path = args
@@ -87,7 +87,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if command == "self-play" && device == DeviceConfig::Cpu {
         let config = self_play::Config::load("config/datagen.toml", args)?;
         let model = ModelEvaluator::load(&config.model, config.device)?;
-        let run = self_play::generate(&config, &model, &Settings::load()?)?;
+        let run = self_play::generate(&config, &model)?;
         println!("{}", run.display());
         return Ok(());
     }
@@ -111,7 +111,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             let model = ModelEvaluator::load(Path::new(&model), device)?;
-            let mut moves = model.search(&game, visits, Settings::load()?.exploration)?;
+            let mut moves = model.search(
+                &game,
+                visits,
+                &EngineConfig::from_repo_file("engine.toml")?.search,
+            )?;
             moves.sort_by_key(|entry| std::cmp::Reverse(entry.visits));
             for entry in moves {
                 println!("{} {}", entry.mv, entry.visits);
@@ -152,7 +156,7 @@ fn eval_options(
 
 fn search_options(
     mut args: impl Iterator<Item = String>,
-) -> Result<(Options, Settings), Box<dyn std::error::Error>> {
+) -> Result<(Options, SearchSettings), Box<dyn std::error::Error>> {
     let mut match_args = Vec::new();
     let mut candidate_args = Vec::new();
     while let Some(flag) = args.next() {
@@ -160,7 +164,7 @@ fn search_options(
             "--set" => {
                 let entry = args.next().ok_or("--set needs KEY=VALUE")?;
                 if let Some(setting) = entry.strip_prefix("candidate.") {
-                    candidate_args.extend([flag, setting.to_owned()]);
+                    candidate_args.extend([flag, format!("search.{setting}")]);
                 } else {
                     match_args.extend([flag, entry]);
                 }
@@ -171,10 +175,7 @@ fn search_options(
     }
     Ok((
         Options::load(&repo_config_path("eval-model.toml"), match_args.into_iter())?,
-        <Settings as TomlConfig>::load(
-            &repo_config_path("engine.toml"),
-            candidate_args.into_iter(),
-        )?,
+        EngineConfig::load(&repo_config_path("engine.toml"), candidate_args.into_iter())?.search,
     ))
 }
 
@@ -194,7 +195,7 @@ mod tests {
 
     #[test]
     fn search_overrides_apply_only_to_the_candidate() -> Result<(), Box<dyn std::error::Error>> {
-        let baseline = Settings::load()?;
+        let baseline = EngineConfig::from_repo_file("engine.toml")?.search;
         let (_, candidate) = search_options(
             ["--set", "max_pairs=2", "--set", "candidate.exploration=2.5"]
                 .into_iter()

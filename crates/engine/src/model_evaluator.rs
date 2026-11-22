@@ -57,18 +57,24 @@ impl ModelEvaluator {
         &self,
         game: &Game,
         visits: std::num::NonZeroU32,
-        exploration: f32,
+        settings: &crate::settings::SearchSettings,
     ) -> io::Result<Vec<MoveVisits>> {
         if game.outcome().is_some() {
             return Ok(Vec::new());
         }
         let mut search = Search::new();
-        while let Some(leaf) = search.next_leaf(game, visits, exploration) {
+        while let Some(leaf) = search.next_leaf(game, visits, settings) {
             let result = self
                 .evaluate(vec![leaf.input()])?
                 .pop()
                 .expect("one prediction");
-            search.evaluate(leaf, result.value, result.draw, &result.priors);
+            search.evaluate(
+                leaf,
+                result.value,
+                result.draw,
+                &result.priors,
+                settings.policy_temperature,
+            );
         }
         Ok(search.visits().collect())
     }

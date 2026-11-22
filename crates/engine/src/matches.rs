@@ -13,7 +13,7 @@ use crate::{
     chess::{Color, Game, Outcome},
     mcts::Search,
     model_evaluator::ModelEvaluator,
-    settings::Settings,
+    settings::SearchSettings,
     sprt,
 };
 
@@ -49,7 +49,7 @@ impl ActiveGame {
         usize::from(self.game.turn() == self.candidate_color())
     }
 
-    fn play(&mut self, settings: &[Settings; 2]) -> Option<Outcome> {
+    fn play(&mut self, settings: &[SearchSettings; 2]) -> Option<Outcome> {
         let player = self.player();
         let mv = self.searches[player].best_move();
         self.game.play_legal(mv);
@@ -117,6 +117,7 @@ fn nelo_summary(counts: [u64; 5], sprt: Option<&sprt::Config>) -> String {
 }
 
 fn time_matched_visits(
+    settings: &SearchSettings,
     players: [&ModelEvaluator; 2],
     batch_size: usize,
     baseline_visits: NonZeroU32,
@@ -128,7 +129,7 @@ fn time_matched_visits(
     let mut batch = Vec::with_capacity(batch_size);
     while batch.len() < batch_size {
         // Use the same nonterminal positions and legal moves for both checkpoints.
-        let Some(leaf) = Search::new().next_leaf(&game, NonZeroU32::MIN, 0.0) else {
+        let Some(leaf) = Search::new().next_leaf(&game, NonZeroU32::MIN, settings) else {
             game = Game::default();
             continue;
         };
@@ -218,7 +219,7 @@ pub fn run(
     mode: Mode,
     matched_speed: bool,
     players: [&ModelEvaluator; 2],
-    settings: [Settings; 2],
+    settings: [SearchSettings; 2],
 ) -> io::Result<()> {
     let openings = load_openings(&options)?;
     play(&options, &openings, mode, matched_speed, players, settings)?;
@@ -266,7 +267,7 @@ fn play(
     mode: Mode,
     matched_speed: bool,
     players: [&ModelEvaluator; 2],
-    settings: [Settings; 2],
+    settings: [SearchSettings; 2],
 ) -> io::Result<MatchResult> {
     let (mut sprt, pass_floor) = match mode {
         Mode::Gainer => (
@@ -288,6 +289,7 @@ fn play(
         [options.baseline_visits_per_move; 2]
     } else {
         time_matched_visits(
+            &settings[0],
             players,
             benchmark_batch,
             options.baseline_visits_per_move,
@@ -296,8 +298,12 @@ fn play(
     };
     for (name, search) in ["baseline", "candidate"].into_iter().zip(&settings) {
         println!(
-            "{name} search: exploration={} reuse_subtree={}",
-            search.exploration, search.reuse_subtree
+            "{name} search: exploration={} reuse_subtree={} first_play={:?} pending_value={:?} policy_temperature={}",
+            search.exploration,
+            search.reuse_subtree,
+            search.first_play,
+            search.pending_value,
+            search.policy_temperature
         );
     }
     let mut work = Mutex::new(Work {

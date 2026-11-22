@@ -1,0 +1,9 @@
+pairs = 1000
+
+[[candidates]]
+name = "1000"
+checkpoint = "/data/chess/chess-engine-5/models/2026.11.21-overnight/self-play-depth-with-reuse/candidate-1000"
+
+[[candidates]]
+name = "1200"
+checkpoint = "/data/chess/chess-engine-5/models/2026.11.21-overnight/self-play-depth-with-reuse/candidate-1200"

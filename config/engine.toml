@@ -1,2 +1,6 @@
+[search]
 exploration = 1.4
 reuse_subtree = true
+first_play = { mode = "parent", reduction = 0.15 }
+pending_value = { mode = "loss", amount = 1.0 }
+policy_temperature = 2.0

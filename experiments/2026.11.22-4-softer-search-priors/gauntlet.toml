@@ -1,0 +1,13 @@
+pairs = 1000
+
+[[candidates]]
+name = "1.50"
+settings = { policy_temperature = 1.5 }
+
+[[candidates]]
+name = "1.70"
+settings = { policy_temperature = 1.7 }
+
+[[candidates]]
+name = "2.00"
+settings = { policy_temperature = 2.0 }

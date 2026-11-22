@@ -14,7 +14,7 @@ use crate::{
     chess::{Color, Game, Outcome},
     mcts::{Leaf, Search},
     model_evaluator::ModelEvaluator,
-    settings::Settings,
+    settings::SearchSettings,
 };
 
 #[chess_config::toml_config]
@@ -28,7 +28,7 @@ pub struct Config {
     leaves_per_game: NonZeroUsize,
     search_threads: NonZeroUsize,
     visits_per_move: NonZeroU16,
-    reuse_subtree: bool,
+    search: SearchSettings,
     seed: u64,
     #[range(min = 0.0)]
     temperature: f64,
@@ -73,16 +73,11 @@ impl ActiveGame {
         }
     }
 
-    fn collect(
-        &mut self,
-        settings: &Settings,
-        config: &Config,
-        collect: impl FnMut(Leaf),
-    ) -> Option<i8> {
+    fn collect(&mut self, config: &Config, collect: impl FnMut(Leaf)) -> Option<i8> {
         if self.search.collect_leaves(
             &self.game,
             config.visits_per_move.into(),
-            settings.exploration,
+            &config.search,
             config.leaves_per_game.get(),
             collect,
         ) > 0
@@ -127,7 +122,7 @@ impl ActiveGame {
         self.game.play_legal(played);
         let outcome = self.game.outcome();
         if outcome.is_none() {
-            if config.reuse_subtree {
+            if config.search.reuse_subtree {
                 self.search.advance_root(played);
             } else {
                 self.search = Search::new();
@@ -140,7 +135,7 @@ impl ActiveGame {
 mod scheduler;
 use scheduler::play_games;
 
-pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) -> Result<PathBuf> {
+pub fn generate(config: &Config, model: &ModelEvaluator) -> Result<PathBuf> {
     let version = config.output_dir.join(format!("v{FORMAT_VERSION}"));
     fs::create_dir_all(&version)?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
@@ -160,7 +155,7 @@ pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) ->
     for start in (0..total_games).step_by(games_per_shard) {
         let end = start.saturating_add(games_per_shard).min(total_games);
         let started = Instant::now();
-        let games = play_games(settings, config, start..end, |batch| {
+        let games = play_games(config, start..end, |batch| {
             evaluated_leaves += batch.len() as u64;
             model.evaluate(batch)
         })?;
@@ -205,7 +200,7 @@ pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) ->
         "draws": draws,
         "start_position": "standard",
         "visits_per_move": config.visits_per_move.get(),
-        "reuse_subtree": config.reuse_subtree,
+        "reuse_subtree": config.search.reuse_subtree,
         "value": model.value_config(),
         "priors": "smolgen-policy-v1",
         "checkpoint": model.model_dir,
@@ -216,7 +211,10 @@ pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) ->
         "sampling": "chacha8-stream-per-game; temperature applied to root visits",
         "temperature": config.temperature,
         "cooling": config.cooling,
-        "exploration": settings.exploration,
+        "exploration": config.search.exploration,
+        "first_play": config.search.first_play,
+        "pending_value": config.search.pending_value,
+        "policy_temperature": config.search.policy_temperature,
     });
     let partial = run.join("manifest.json.partial");
     fs::write(&partial, format!("{manifest:#}\n"))?;
@@ -232,8 +230,7 @@ mod tests {
     #[test]
     fn queued_workers_finish_when_inference_fails() -> Result<()> {
         let config = Config::from_repo_file("datagen.toml")?;
-        let settings = Settings::load()?;
-        let result = play_games(&settings, &config, 0..16, |_| {
+        let result = play_games(&config, 0..16, |_| {
             Err(std::io::Error::other("failed inference"))
         });
         assert_eq!(result.err().unwrap().to_string(), "failed inference");
@@ -244,10 +241,9 @@ mod tests {
     fn refilling_preserves_seeded_games_and_ids() -> Result<()> {
         let mut config = Config::from_repo_file("datagen.toml")?;
         config.visits_per_move = NonZeroU16::new(4).unwrap();
-        let settings = Settings::load()?;
         config.search_threads = NonZeroUsize::new(2).unwrap();
         let run = |config: &Config| {
-            play_games(&settings, config, 5..12, |pending| {
+            play_games(config, 5..12, |pending| {
                 assert!(pending.len() <= config.batch.get() * config.leaves_per_game.get());
                 Ok(pending
                     .iter()

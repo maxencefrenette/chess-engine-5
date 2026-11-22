@@ -8,9 +8,9 @@ root_wdl_fraction = 0.5
 value_loss_weight = 0.6
 
 [[curriculum]]
-dataset = "/data/chess/chess-engine-5/models/2026.11.21-13-subtree-reuse/data/v4/1795313226655253877-2791114"
-num_positions = 1277100
-epochs = 15.0
+dataset = "/data/chess/chess-engine-5/models/2026.11.21-overnight/self-play-depth-with-reuse/1000-data/v4/1795339902501760338-2944057"
+num_positions = 994000
+epochs = 18.0
 
 [optimizer]
 kind = "adamw"

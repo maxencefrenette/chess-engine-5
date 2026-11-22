@@ -1,0 +1,76 @@
+<svg width="720" height="420" viewBox="0 0 720 420" xmlns="http://www.w3.org/2000/svg">
+<rect x="0" y="0" width="720" height="420" opacity="1" fill="#FFFFFF" stroke="none"/>
+<text x="360" y="29" dy="0.76em" text-anchor="middle" font-family="serif" font-size="16.129032258064516" opacity="1" fill="#000000">
+Loss vs Epochs
+</text>
+<text x="24" y="199" dy="0.76em" text-anchor="middle" font-family="serif" font-size="13.709677419354838" opacity="1" fill="#000000" transform="rotate(270, 24, 199)">
+Loss (95% CI)
+</text>
+<text x="396" y="396" dy="-0.5ex" text-anchor="middle" font-family="serif" font-size="13.709677419354838" opacity="1" fill="#000000">
+Epochs
+</text>
+<polyline fill="none" opacity="1" stroke="#000000" stroke-width="1" points="95,50 95,347 "/>
+<text x="86" y="341" dy="0.5ex" text-anchor="end" font-family="serif" font-size="12.096774193548388" opacity="1" fill="#000000">
+2.285
+</text>
+<polyline fill="none" opacity="1" stroke="#000000" stroke-width="1" points="90,341 95,341 "/>
+<text x="86" y="303" dy="0.5ex" text-anchor="end" font-family="serif" font-size="12.096774193548388" opacity="1" fill="#000000">
+2.29
+</text>
+<polyline fill="none" opacity="1" stroke="#000000" stroke-width="1" points="90,303 95,303 "/>
+<text x="86" y="265" dy="0.5ex" text-anchor="end" font-family="serif" font-size="12.096774193548388" opacity="1" fill="#000000">
+2.295
+</text>
+<polyline fill="none" opacity="1" stroke="#000000" stroke-width="1" points="90,265 95,265 "/>
+<text x="86" y="227" dy="0.5ex" text-anchor="end" font-family="serif" font-size="12.096774193548388" opacity="1" fill="#000000">
+2.3
+</text>
+<polyline fill="none" opacity="1" stroke="#000000" stroke-width="1" points="90,227 95,227 "/>
+<text x="86" y="188" dy="0.5ex" text-anchor="end" font-family="serif" font-size="12.096774193548388" opacity="1" fill="#000000">
+2.305
+</text>
+<polyline fill="none" opacity="1" stroke="#000000" stroke-width="1" points="90,188 95,188 "/>
+<text x="86" y="150" dy="0.5ex" text-anchor="end" font-family="serif" font-size="12.096774193548388" opacity="1" fill="#000000">
+2.31
+</text>
+<polyline fill="none" opacity="1" stroke="#000000" stroke-width="1" points="90,150 95,150 "/>
+<text x="86" y="112" dy="0.5ex" text-anchor="end" font-family="serif" font-size="12.096774193548388" opacity="1" fill="#000000">
+2.315
+</text>
+<polyline fill="none" opacity="1" stroke="#000000" stroke-width="1" points="90,112 95,112 "/>
+<polyline fill="none" opacity="1" stroke="#000000" stroke-width="1" points="96,348 695,348 "/>
+<polyline fill="none" opacity="1" stroke="#000000" stroke-width="1" points="123,347 123,343 "/>
+<text x="123" y="355" dy="0.76em" text-anchor="middle" font-family="serif" font-size="12.096774193548388" opacity="1" fill="#000000">
+9
+</text>
+<polyline fill="none" opacity="1" stroke="#000000" stroke-width="1" points="304,347 304,343 "/>
+<text x="304" y="355" dy="0.76em" text-anchor="middle" font-family="serif" font-size="12.096774193548388" opacity="1" fill="#000000">
+12
+</text>
+<polyline fill="none" opacity="1" stroke="#000000" stroke-width="1" points="486,347 486,343 "/>
+<text x="486" y="355" dy="0.76em" text-anchor="middle" font-family="serif" font-size="12.096774193548388" opacity="1" fill="#000000">
+15
+</text>
+<polyline fill="none" opacity="1" stroke="#000000" stroke-width="1" points="667,347 667,343 "/>
+<text x="667" y="355" dy="0.76em" text-anchor="middle" font-family="serif" font-size="12.096774193548388" opacity="1" fill="#000000">
+18
+</text>
+<polyline fill="none" opacity="1" stroke="#6A00A8" stroke-width="1" points="123,101 304,258 486,283 667,297 "/>
+<line opacity="1" stroke="#6A00A8" stroke-width="1" x1="118" y1="139" x2="128" y2="139"/>
+<line opacity="1" stroke="#6A00A8" stroke-width="1" x1="118" y1="64" x2="128" y2="64"/>
+<line opacity="1" stroke="#6A00A8" stroke-width="1" x1="123" y1="139" x2="123" y2="64"/>
+<circle cx="123" cy="101" r="5" opacity="1" fill="#6A00A8" stroke="none" stroke-width="1"/>
+<line opacity="1" stroke="#6A00A8" stroke-width="1" x1="299" y1="295" x2="309" y2="295"/>
+<line opacity="1" stroke="#6A00A8" stroke-width="1" x1="299" y1="220" x2="309" y2="220"/>
+<line opacity="1" stroke="#6A00A8" stroke-width="1" x1="304" y1="295" x2="304" y2="220"/>
+<circle cx="304" cy="258" r="5" opacity="1" fill="#6A00A8" stroke="none" stroke-width="1"/>
+<line opacity="1" stroke="#6A00A8" stroke-width="1" x1="481" y1="320" x2="491" y2="320"/>
+<line opacity="1" stroke="#6A00A8" stroke-width="1" x1="481" y1="245" x2="491" y2="245"/>
+<line opacity="1" stroke="#6A00A8" stroke-width="1" x1="486" y1="320" x2="486" y2="245"/>
+<circle cx="486" cy="283" r="5" opacity="1" fill="#6A00A8" stroke="none" stroke-width="1"/>
+<line opacity="1" stroke="#6A00A8" stroke-width="1" x1="662" y1="334" x2="672" y2="334"/>
+<line opacity="1" stroke="#6A00A8" stroke-width="1" x1="662" y1="259" x2="672" y2="259"/>
+<line opacity="1" stroke="#6A00A8" stroke-width="1" x1="667" y1="334" x2="667" y2="259"/>
+<circle cx="667" cy="297" r="5" opacity="1" fill="#6A00A8" stroke="none" stroke-width="1"/>
+<rect x="96" y="50" width="599" height="297" opacity="1" fill="none" stroke="#000000"/>
+</svg>

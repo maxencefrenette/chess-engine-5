@@ -1,4 +1,4 @@
-baseline_dir = "/data/chess/chess-engine-5/models/2026.11.21-13-subtree-reuse/candidate"
+baseline_dir = "/data/chess/chess-engine-5/models/2026.11.21-overnight/epochs-with-reused-search-data/epochs-18"
 opening_book = "UHO_Lichess_4560_v1.epd"
 device = "cuda"
 batch = 256

@@ -3,7 +3,7 @@ use std::{collections::HashSet, error::Error, num::NonZeroU64, path::PathBuf};
 use chess_config::{PartialConfig, TomlConfig};
 use serde::de::DeserializeOwned;
 
-use super::{Mode, ModelEvaluator, Options, Settings, load_openings, nelo_summary, play};
+use super::{Mode, ModelEvaluator, Options, SearchSettings, load_openings, nelo_summary, play};
 
 #[chess_config::toml_config]
 #[serde(bound(deserialize = "T: DeserializeOwned"))]
@@ -21,12 +21,12 @@ struct ModelCandidate {
 #[chess_config::toml_config]
 struct SearchCandidate {
     name: String,
-    settings: PartialConfig<Settings>,
+    settings: PartialConfig<SearchSettings>,
 }
 
 enum Candidate {
     Model(PathBuf),
-    Search(Settings),
+    Search(SearchSettings),
 }
 
 pub struct Gauntlet {
@@ -48,7 +48,7 @@ impl Gauntlet {
         })
     }
 
-    pub fn search(path: &str, baseline: Settings) -> Result<Self, Box<dyn Error>> {
+    pub fn search(path: &str, baseline: SearchSettings) -> Result<Self, Box<dyn Error>> {
         let plan = Plan::<SearchCandidate>::from_file(path)?;
         let mut candidates = Vec::new();
         for candidate in plan.candidates {
@@ -67,7 +67,7 @@ impl Gauntlet {
     pub fn run(
         self,
         mut options: Options,
-        settings: Settings,
+        settings: SearchSettings,
         matched_speed: bool,
     ) -> Result<(), Box<dyn Error>> {
         if self.candidates.is_empty() {

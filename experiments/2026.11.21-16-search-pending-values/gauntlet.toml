@@ -1,0 +1,9 @@
+pairs = 1000
+
+[[candidates]]
+name = "half-loss"
+settings = { pending_value = { mode = "loss", amount = 0.5 } }
+
+[[candidates]]
+name = "virtual-mean"
+settings = { pending_value = { mode = "mean" } }

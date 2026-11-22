@@ -2,11 +2,10 @@ use std::{io, ops::Range, sync::Mutex};
 
 use chess_network::inference::Prediction;
 
-use super::{ActiveGame, Config, PlayedGame, Settings};
+use super::{ActiveGame, Config, PlayedGame};
 use crate::{mcts::Leaf, model_evaluator::Input};
 
 struct Shard<'a> {
-    settings: &'a Settings,
     config: &'a Config,
     remaining: Mutex<Range<usize>>,
 }
@@ -22,9 +21,13 @@ struct Group {
 impl Group {
     fn advance(&mut self, predictions: Vec<Prediction>, shard: &Shard) -> Option<Vec<Input>> {
         for ((i, leaf), result) in self.leaves.drain(..).zip(predictions) {
-            self.active[i]
-                .search
-                .evaluate(leaf, result.value, result.draw, &result.priors);
+            self.active[i].search.evaluate(
+                leaf,
+                result.value,
+                result.draw,
+                &result.priors,
+                shard.config.search.policy_temperature,
+            );
         }
         loop {
             // Replace slots only after all replies referring to those indices were applied.
@@ -49,9 +52,7 @@ impl Group {
                 return None;
             }
             for (i, game) in self.active.iter_mut().enumerate() {
-                let outcome = game.collect(shard.settings, shard.config, |leaf| {
-                    self.leaves.push((i, leaf))
-                });
+                let outcome = game.collect(shard.config, |leaf| self.leaves.push((i, leaf)));
                 if let Some(value) = outcome {
                     self.finished.push((i, value));
                 }
@@ -64,14 +65,12 @@ impl Group {
 }
 
 pub(super) fn play_games(
-    settings: &Settings,
     config: &Config,
     ids: Range<usize>,
     mut evaluate: impl FnMut(Vec<Input>) -> io::Result<Vec<Prediction>>,
 ) -> io::Result<Vec<(usize, PlayedGame)>> {
     let slots = config.batch.get().min(ids.len());
     let shard = Shard {
-        settings,
         config,
         remaining: Mutex::new(ids),
     };

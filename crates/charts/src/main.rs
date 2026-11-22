@@ -1,102 +1,39 @@
+use chess_charts::{Result, loss_categorical, loss_numeric, nelo_categorical, nelo_numeric};
+use serde::de::DeserializeOwned;
 use std::{env, path::Path};
 
-use chess_charts::{Estimate, Result, Series, SweepPoint};
+const USAGE: &str = "usage: chess-charts TYPE OUTPUT.svg X_LABEL INPUT.csv
 
-const USAGE: &str = "usage: chess-charts
-  training OUTPUT.svg METRIC LABEL=training.csv [LABEL=training.csv ...]
-  nelo OUTPUT.svg INPUT.csv
-  sweep OUTPUT.svg X_LABEL INPUT.csv
+TYPE               CSV columns
+nelo-numeric       x,nelo,lower,upper
+nelo-categorical   label,nelo,lower,upper
+loss-numeric       x,loss
+loss-categorical   label,loss
 
-Training curves use elapsed_time (seconds) on the x-axis.
-nElo CSV columns: label,nelo,lower,upper (95% confidence bounds).
-Sweep CSV columns: x,nelo,lower,upper (95% confidence bounds).";
+Numeric x values must be finite. Categories follow CSV order.
+Supply 95% confidence bounds for nElo. For single-run total loss, charts use
+approximate 95% bounds of loss ± 1.96 × loss_stddev from config/eval-model.toml.";
 
-fn column(headers: &csv::StringRecord, name: &str) -> Result<usize> {
-    headers
-        .iter()
-        .position(|h| h == name)
-        .ok_or_else(|| format!("missing CSV column: {name}").into())
+fn read_csv<T: DeserializeOwned>(path: &str) -> Result<Vec<T>> {
+    let mut reader = csv::Reader::from_path(path)?;
+    Ok(reader.deserialize().collect::<csv::Result<_>>()?)
 }
 
 fn run() -> Result<()> {
     let args: Vec<_> = env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
-        None | Some("--help") => {
-            println!("{USAGE}");
-            Ok(())
-        }
-        Some("training") if args.len() >= 4 => {
-            let mut series = Vec::new();
-            for input in &args[3..] {
-                let (label, path) = input.split_once('=').ok_or("expected LABEL=CSV")?;
-                let mut reader = csv::Reader::from_path(path)?;
-                let x = column(reader.headers()?, "elapsed_time")?;
-                let y = column(reader.headers()?, &args[2])?;
-                let points = reader
-                    .records()
-                    .map(|row| {
-                        let row = row?;
-                        Ok((row[x].parse()?, row[y].parse()?))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                series.push(Series {
-                    label: label.into(),
-                    points,
-                });
-            }
-            chess_charts::lines(
-                Path::new(&args[1]),
-                &format!("Training: {}", args[2]),
-                "Elapsed training time (s)",
-                &args[2],
-                &series,
-            )
-        }
-        Some("nelo") if args.len() == 3 => {
-            let mut reader = csv::Reader::from_path(&args[2])?;
-            let indices = ["label", "nelo", "lower", "upper"]
-                .map(|name| column(reader.headers()?, name))
-                .into_iter()
-                .collect::<Result<Vec<_>>>()?;
-            let estimates = reader
-                .records()
-                .map(|row| {
-                    let row = row?;
-                    Ok(Estimate {
-                        label: row[indices[0]].into(),
-                        nelo: row[indices[1]].parse()?,
-                        lower: row[indices[2]].parse()?,
-                        upper: row[indices[3]].parse()?,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            chess_charts::nelo(Path::new(&args[1]), "Model comparison", &estimates)
-        }
-        Some("sweep") if args.len() == 4 => {
-            let mut reader = csv::Reader::from_path(&args[3])?;
-            let indices = ["x", "nelo", "lower", "upper"]
-                .map(|name| column(reader.headers()?, name))
-                .into_iter()
-                .collect::<Result<Vec<_>>>()?;
-            let points = reader
-                .records()
-                .map(|row| {
-                    let row = row?;
-                    Ok(SweepPoint {
-                        x: row[indices[0]].parse()?,
-                        nelo: row[indices[1]].parse()?,
-                        lower: row[indices[2]].parse()?,
-                        upper: row[indices[3]].parse()?,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            chess_charts::sweep(
-                Path::new(&args[1]),
-                &format!("nElo vs {}", args[2]),
-                &args[2],
-                &points,
-            )
-        }
+    if args.is_empty() || args == ["--help"] {
+        println!("{USAGE}");
+        return Ok(());
+    }
+    let [kind, output, x_label, input] = args.as_slice() else {
+        return Err(USAGE.into());
+    };
+    let path = Path::new(output);
+    match kind.as_str() {
+        "nelo-numeric" => nelo_numeric(path, x_label, &read_csv(input)?),
+        "nelo-categorical" => nelo_categorical(path, x_label, &read_csv(input)?),
+        "loss-numeric" => loss_numeric(path, x_label, &read_csv(input)?),
+        "loss-categorical" => loss_categorical(path, x_label, &read_csv(input)?),
         _ => Err(USAGE.into()),
     }
 }

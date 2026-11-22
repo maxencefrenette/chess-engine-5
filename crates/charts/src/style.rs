@@ -4,9 +4,7 @@ use crate::Result;
 
 pub(crate) const FONT: &str = "serif";
 pub(crate) const INK: RGBColor = BLACK;
-pub(crate) const LEGEND_BORDER: RGBColor = RGBColor(210, 210, 210);
 pub(crate) const LINE_WIDTH: u32 = 1;
-pub(crate) const MARKER_RADIUS: i32 = 3;
 
 /// Spread ordered series across the purple–pink–yellow palette.
 pub(crate) fn color(index: usize, count: usize) -> RGBColor {

@@ -1,0 +1,13 @@
+pairs = 1000
+
+[[candidates]]
+name = "parent-0.00"
+settings = { first_play = { mode = "parent", reduction = 0.0 } }
+
+[[candidates]]
+name = "parent-0.15"
+settings = { first_play = { mode = "parent", reduction = 0.15 } }
+
+[[candidates]]
+name = "parent-0.30"
+settings = { first_play = { mode = "parent", reduction = 0.3 } }
