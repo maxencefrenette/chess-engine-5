@@ -2,14 +2,12 @@ use std::{io, ops::Range, sync::Mutex};
 
 use chess_network::inference::Prediction;
 
-use super::{ActiveGame, Config, PlayedGame, PlayoutCap, Settings};
+use super::{ActiveGame, Config, PlayedGame, Settings};
 use crate::{mcts::Leaf, model_evaluator::Input};
 
 struct Shard<'a> {
     settings: &'a Settings,
     config: &'a Config,
-    fast_visits: std::num::NonZeroU16,
-    full_search_rate: f64,
     remaining: Mutex<Range<usize>>,
 }
 
@@ -35,7 +33,7 @@ impl Group {
                 let game = match next {
                     Some(id) => std::mem::replace(
                         &mut self.active[i],
-                        ActiveGame::new(shard.config.seed, id, shard.full_search_rate),
+                        ActiveGame::new(shard.config.seed, id),
                     ),
                     None => self.active.swap_remove(i),
                 };
@@ -51,13 +49,9 @@ impl Group {
                 return None;
             }
             for (i, game) in self.active.iter_mut().enumerate() {
-                let outcome = game.collect(
-                    shard.settings,
-                    shard.config,
-                    shard.fast_visits,
-                    shard.full_search_rate,
-                    |leaf| self.leaves.push((i, leaf)),
-                );
+                let outcome = game.collect(shard.settings, shard.config, |leaf| {
+                    self.leaves.push((i, leaf))
+                });
                 if let Some(value) = outcome {
                     self.finished.push((i, value));
                 }
@@ -76,18 +70,9 @@ pub(super) fn play_games(
     mut evaluate: impl FnMut(Vec<Input>) -> io::Result<Vec<Prediction>>,
 ) -> io::Result<Vec<(usize, PlayedGame)>> {
     let slots = config.batch.get().min(ids.len());
-    let (fast_visits, full_search_rate) = match config.playout_cap {
-        PlayoutCap::Disabled {} => (config.visits_per_move, 1.0),
-        PlayoutCap::Enabled {
-            fast_visits,
-            full_search_rate,
-        } => (fast_visits, full_search_rate),
-    };
     let shard = Shard {
         settings,
         config,
-        fast_visits,
-        full_search_rate,
         remaining: Mutex::new(ids),
     };
     let groups = crate::inference_queue::run(
@@ -100,7 +85,7 @@ pub(super) fn play_games(
                 .unwrap()
                 .by_ref()
                 .take(n)
-                .map(|id| ActiveGame::new(config.seed, id, full_search_rate))
+                .map(|id| ActiveGame::new(config.seed, id))
                 .collect(),
             ..Group::default()
         },

@@ -7,7 +7,6 @@ mod data;
 mod packed_adamw;
 mod reply;
 mod train;
-mod weight_averaging;
 
 fn run() -> Result<(), Box<dyn Error>> {
     let config = config::Config::load("config/training.toml", env::args().skip(1))?;

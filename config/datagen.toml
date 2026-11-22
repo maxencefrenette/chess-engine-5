@@ -7,7 +7,6 @@ batch = 256
 leaves_per_game = 4
 search_threads = 2
 visits_per_move = 800
-playout_cap = { mode = "disabled" }
 seed = 42
 temperature = 1.0
 cooling = { mode = "after", ply = 45, temperature = 0.5 }

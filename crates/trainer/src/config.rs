@@ -11,7 +11,6 @@ pub struct Config {
     pub device: chess_config::DeviceConfig,
     pub(crate) batch_size: NonZeroUsize,
     pub(crate) optimizer: OptimizerConfig,
-    pub(crate) weight_averaging: WeightAveraging,
     #[range(min = 0.0)]
     pub(crate) reply_weight: f64,
     pub(crate) seed: u64,
@@ -23,17 +22,6 @@ pub struct Config {
     pub(crate) value_loss_weight: f64,
     pub(crate) curriculum: Vec<CurriculumStep>,
     pub(crate) model: ModelConfig,
-}
-
-#[chess_config::toml_config]
-#[derive(serde::Serialize)]
-#[serde(tag = "mode", rename_all = "snake_case")]
-pub(crate) enum WeightAveraging {
-    Disabled {},
-    Tail {
-        #[range(min_exclusive = 0.0, max = 1.0)]
-        fraction: f64,
-    },
 }
 
 #[chess_config::toml_config]

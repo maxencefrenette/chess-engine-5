@@ -161,8 +161,6 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         })
         .transpose()?;
     let mut optimizer = crate::packed_adamw::PackedAdamW::new(parameters.all_vars(), adamw.into())?;
-    let mut average =
-        crate::weight_averaging::TailAverage::new(&config.weight_averaging, planned_steps);
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut history = Vec::with_capacity(planned_steps.div_ceil(METRICS_INTERVAL));
     device.synchronize()?;
@@ -199,7 +197,6 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
                     adamw.learning_rate * adamw.schedule.multiplier(optimizer_steps, planned_steps);
                 optimizer.step(&objective.backward()?, lr)?;
                 optimizer_steps += 1;
-                average.update(&parameters, optimizer_steps)?;
                 positions_seen += chunk.len();
                 let policy = f64::from(policy.to_scalar::<f32>()?);
                 let wdl = f64::from(value.to_scalar::<f32>()?);
@@ -250,15 +247,14 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         .as_secs_f64();
 
     // Load the trained parameters as constants so the test pass does not build a backward graph.
-    let mut tensors: std::collections::HashMap<_, _> = parameters
+    let tensors: std::collections::HashMap<_, _> = parameters
         .data()
         .lock()
         .unwrap()
         .iter()
+        .filter(|(name, _)| !name.starts_with("reply."))
         .map(|(name, var)| (name.clone(), var.as_tensor().detach()))
         .collect();
-    tensors = average.finish(tensors);
-    tensors.retain(|name, _| !name.starts_with("reply."));
     let builder = VarBuilder::from_tensors(tensors.clone(), DType::F32, device);
     let net = Net::new(builder, model)?;
     let mut counts = [1.; 3];
