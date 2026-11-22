@@ -93,7 +93,6 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
     }
     let setup_started = Instant::now();
     data::check_disjoint(curriculum.iter().map(|step| step.dataset.as_path()))?;
-    let mut rescorer = config.value_rescoring.open()?;
     let datasets = curriculum
         .iter()
         .enumerate()
@@ -103,15 +102,10 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
                 &config,
                 step.num_positions.get(),
                 index + 1 == curriculum.len(),
-                &mut rescorer,
             )
             .map_err(|error| format!("dataset {}: {error}", step.dataset.display()).into())
         })
         .collect::<Result<Vec<_>>>()?;
-    println!(
-        "tablebase rescoring: {} value labels probed, {} changed",
-        rescorer.stats.probed, rescorer.stats.changed
-    );
     let phase_steps = curriculum
         .iter()
         .zip(&datasets)
@@ -321,7 +315,6 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         "train_games": train_games,
         "train_positions": train_positions,
         "value_train_positions": value_label_count,
-        "tablebase_rescoring": rescorer.stats,
         "value_train_games": value_labels.len(),
         "value_labels_per_game_p90": value_p90,
         "test_game_ids": held_out.test_ids,
@@ -380,8 +373,8 @@ mod tests {
         let device = &Device::Cpu;
         let logits =
             candle_core::Var::from_slice(&[0.3f32, -0.8, 1.2, -0.4, 0.7, 0.2], (2, 3), device)?;
-        let original = Tensor::new(&[1u32, 0], device)?;
-        let rescored = Tensor::new(&[2u32, 1], device)?;
+        let outcome = Tensor::new(&[1u32, 0], device)?;
+        let root = Tensor::new(&[2u32, 1], device)?;
         for mix in [0f64, 0.25, 1.] {
             let targets = Tensor::new(
                 &[
@@ -391,8 +384,8 @@ mod tests {
                 device,
             )?;
             let soft = soft_value_loss(&logits, &targets)?;
-            let hard = ((candle_nn::loss::cross_entropy(&logits, &original)? * (1. - mix))?
-                + (candle_nn::loss::cross_entropy(&logits, &rescored)? * mix)?)?;
+            let hard = ((candle_nn::loss::cross_entropy(&logits, &outcome)? * (1. - mix))?
+                + (candle_nn::loss::cross_entropy(&logits, &root)? * mix)?)?;
             assert!((soft.to_scalar::<f32>()? - hard.to_scalar::<f32>()?).abs() < 1e-6);
             let sg = soft.backward()?;
             let hg = hard.backward()?;

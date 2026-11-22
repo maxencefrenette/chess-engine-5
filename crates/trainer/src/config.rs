@@ -1,7 +1,6 @@
 use std::{num::NonZeroUsize, path::PathBuf};
 
 use chess_network::ModelConfig;
-use serde::Serialize;
 
 use crate::data::Result;
 
@@ -22,7 +21,6 @@ pub struct Config {
     pub(crate) root_wdl_fraction: f64,
     #[range(min_exclusive = 0.0)]
     pub(crate) value_loss_weight: f64,
-    pub(crate) value_rescoring: RescoringConfig,
     pub(crate) curriculum: Vec<CurriculumStep>,
     pub(crate) model: ModelConfig,
 }
@@ -126,20 +124,6 @@ impl Schedule {
             }
         }
     }
-}
-
-#[chess_config::toml_config]
-#[derive(Serialize)]
-#[serde(tag = "mode", rename_all = "snake_case")]
-pub(crate) enum RescoringConfig {
-    Disabled,
-    Chesstb {
-        directory: PathBuf,
-        #[range(min = 0.0, max = 1.0)]
-        policy_mix: f64,
-        #[range(min = 0.0, max = 1.0)]
-        value_mix: f64,
-    },
 }
 
 #[cfg(test)]

@@ -7,7 +7,6 @@ seed = 42
 value_sample_rate = 0.75
 root_wdl_fraction = 0.5
 value_loss_weight = 0.6
-value_rescoring = { mode = "disabled" }
 
 [[curriculum]]
 dataset = "/data/chess/chess-engine-5/models/2026.11.20-refresh-epochs-visits/refresh-03/data/v4/1795244965930672288-2376771"

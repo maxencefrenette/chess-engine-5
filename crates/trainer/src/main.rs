@@ -6,7 +6,6 @@ mod config;
 mod data;
 mod packed_adamw;
 mod reply;
-mod rescoring;
 mod train;
 mod weight_averaging;
 

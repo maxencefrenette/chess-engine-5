@@ -14,12 +14,12 @@ loss_stddev = 0.002496
 
 [sprt.gainer]
 lower_nelo = 0.0
-upper_nelo = 20.0
+upper_nelo = 15.0
 alpha = 0.05
 beta = 0.05
 
 [sprt.non-regression]
-lower_nelo = -20.0
+lower_nelo = -15.0
 upper_nelo = 0.0
 alpha = 0.05
 beta = 0.05

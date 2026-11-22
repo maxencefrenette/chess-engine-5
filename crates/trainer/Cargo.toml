@@ -16,7 +16,6 @@ chess-network = { path = "../network" }
 chess-data = { path = "../data" }
 serde.workspace = true
 chess-config = { path = "../config" }
-chess-tablebase = { path = "../tablebase" }
 
 [dev-dependencies]
 tempfile = "3"

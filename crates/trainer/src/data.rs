@@ -14,7 +14,7 @@ use chess_network::{INPUTS, SQUARES, encode_position, policy_inputs::PolicyInput
 
 pub struct Row {
     features: Vec<f32>,
-    moves: Vec<(u16, f32)>,
+    moves: Vec<(u16, u16)>,
     reply: Option<crate::reply::Reply>,
     total_visits: f32,
     pub value: [f32; 3],
@@ -50,7 +50,6 @@ pub fn load(
     config: &crate::config::Config,
     train_positions: usize,
     retain_holdout: bool,
-    rescorer: &mut crate::rescoring::Rescorer,
 ) -> Result<Dataset> {
     let seed = config.seed;
     let value_sample_rate = config.value_sample_rate;
@@ -63,7 +62,6 @@ pub fn load(
         })?;
     }
 
-    let history = crate::rescoring::History::new(&rows);
     let mut games: Vec<_> = rows
         .iter()
         .map(|row| row.game_id)
@@ -122,21 +120,8 @@ pub fn load(
             .zip(mask)
             .zip(replies)
             .map(|((row, use_value), reply)| {
-                let outcome_wdl = if use_value && root_fraction < 1.0 {
-                    let repeated = history.has_repeated(&row);
-                    rescorer.value(&row, repeated)?
-                } else {
-                    crate::rescoring::game_value(row.value)
-                };
-                let policy = rescorer.policy(&row)?;
-                let mut encoded = encode_row(
-                    row,
-                    policy,
-                    outcome_wdl,
-                    root_fraction,
-                    use_value,
-                    config.model.perspective,
-                )?;
+                let mut encoded =
+                    encode_row(row, root_fraction, use_value, config.model.perspective)?;
                 encoded.reply = reply;
                 Ok(encoded)
             })
@@ -144,18 +129,7 @@ pub fn load(
         test: test
             .into_iter()
             .filter(|_| retain_holdout)
-            .map(|row| {
-                let policy = crate::rescoring::search_policy(&row);
-                let outcome = crate::rescoring::game_value(row.value);
-                encode_row(
-                    row,
-                    policy,
-                    outcome,
-                    root_fraction,
-                    true,
-                    config.model.perspective,
-                )
-            })
+            .map(|row| encode_row(row, root_fraction, true, config.model.perspective))
             .collect::<Result<_>>()?,
         train_games: by_game.len(),
         value_labels_per_game,
@@ -166,13 +140,14 @@ pub fn load(
 
 fn encode_row(
     row: chess_data::Row,
-    mut moves: Vec<(u16, f32)>,
-    outcome: [f32; 3],
     root_fraction: f32,
     use_value: bool,
     perspective: chess_network::perspective::Perspective,
 ) -> Result<Row> {
     let root = row.position.root_wdl();
+    let mut outcome = [0.; 3];
+    outcome[(row.value + 1) as usize] = 1.;
+    let mut moves = row.position.policy;
     let black_to_move = !row.position.ply.is_multiple_of(2);
     let (board, black, mask) = perspective.orient(row.position.snapshot, black_to_move);
     let mut features = Vec::with_capacity(SQUARES * INPUTS);
@@ -185,7 +160,7 @@ fn encode_row(
     Ok(Row {
         features,
         reply: None,
-        total_visits: moves.iter().map(|(_, visits)| visits).sum(),
+        total_visits: moves.iter().map(|&(_, visits)| f32::from(visits)).sum(),
         moves,
         value: std::array::from_fn(|i| (1. - root_fraction) * outcome[i] + root_fraction * root[i]),
         use_value,
@@ -230,7 +205,7 @@ impl Batch {
             for (j, &(_, visits)) in row.moves.iter().enumerate() {
                 let index = i * width + j;
                 mask[index] = 0.;
-                policy[index] = visits / row.total_visits;
+                policy[index] = f32::from(visits) / row.total_visits;
             }
         }
         let shape = (size, width);
@@ -286,7 +261,6 @@ mod tests {
         let mut config = crate::config::Config::from_repo_file("training.toml")?;
         config.value_sample_rate = 0.5;
         config.reply_weight = 0.;
-        let mut rescorer = crate::config::RescoringConfig::Disabled.open()?;
         let outcome = [0., 1., 0.];
         for (fraction, target) in [
             (0.0, outcome),
@@ -295,7 +269,7 @@ mod tests {
             (1.0, [0.125, 0.5, 0.375]),
         ] {
             config.root_wdl_fraction = fraction;
-            let data = load(dir.path(), &config, 12, true, &mut rescorer)?;
+            let data = load(dir.path(), &config, 12, true)?;
             assert_eq!(data.train.iter().filter(|row| row.use_value).count(), 6);
             assert_eq!(data.test.len(), 4);
             assert!(
@@ -304,75 +278,6 @@ mod tests {
                     .all(|row| row.use_value && row.value == target)
             );
             assert!(data.train.iter().all(|row| row.value == target));
-        }
-        Ok(())
-    }
-
-    #[test]
-    #[ignore = "requires downloaded ChessTB tables on the HDD"]
-    fn rescoring_only_changes_selected_training_value_targets() -> Result<()> {
-        let directory = tempfile::tempdir()?;
-        let positions: Vec<_> = (0..2)
-            .map(|ply| {
-                let mut board = [0; 32];
-                for (square, code) in [(0, 6), (9, 5), (47, 12)] {
-                    board[square / 2] |= code << (4 * (square % 2));
-                }
-                chess_data::Position {
-                    ply,
-                    snapshot: chess_data::Board {
-                        board,
-                        castling: 0,
-                        ep_square: 64,
-                        halfmove_clock: 0,
-                        repetitions: 1,
-                    },
-                    policy: vec![(123, 800)],
-                    root_q: 0.,
-                    root_d: 0.5,
-                    played_move: 123,
-                }
-            })
-            .collect();
-        chess_data::write_shard(
-            directory.path(),
-            0,
-            (0..4).map(|id| (id, positions.as_slice(), 0)),
-            42,
-        )?;
-        let mut disabled = crate::config::RescoringConfig::Disabled.open()?;
-        let mut enabled = crate::config::RescoringConfig::Chesstb {
-            directory: "/data/chess/tablebases/chesstb-5".into(),
-            policy_mix: 0.0,
-            value_mix: 1.0,
-        }
-        .open()?;
-        use chess_config::TomlConfig;
-        let mut config = crate::config::Config::from_repo_file("training.toml")?;
-        config.value_sample_rate = 0.5;
-        let original = load(directory.path(), &config, 6, true, &mut disabled)?;
-        let rescored = load(directory.path(), &config, 6, true, &mut enabled)?;
-        assert_eq!(original.test_ids, rescored.test_ids);
-        assert_eq!(
-            original.estimated_generation_seconds,
-            rescored.estimated_generation_seconds
-        );
-        assert_eq!(
-            original.value_labels_per_game,
-            rescored.value_labels_per_game
-        );
-        assert_eq!(enabled.stats.probed, 3);
-        assert_eq!(enabled.stats.changed, 3);
-        for (before, after) in original.train.iter().zip(&rescored.train) {
-            assert_eq!(before.features, after.features);
-            assert_eq!(before.moves, after.moves);
-            assert_eq!(before.total_visits, after.total_visits);
-            assert_eq!(before.use_value, after.use_value);
-            assert_eq!(before.value != after.value, after.use_value);
-        }
-        for (before, after) in original.test.iter().zip(&rescored.test) {
-            assert_eq!(before.features, after.features);
-            assert_eq!(before.value, after.value);
         }
         Ok(())
     }
