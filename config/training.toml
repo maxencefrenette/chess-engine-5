@@ -8,8 +8,8 @@ root_wdl_fraction = 0.5
 value_loss_weight = 0.6
 
 [[curriculum]]
-dataset = "/data/chess/chess-engine-5/models/2026.11.20-refresh-epochs-visits/refresh-03/data/v4/1795244965930672288-2376771"
-num_positions = 779600
+dataset = "/data/chess/chess-engine-5/models/2026.11.21-13-subtree-reuse/data/v4/1795313226655253877-2791114"
+num_positions = 1277100
 epochs = 15.0
 
 [optimizer]

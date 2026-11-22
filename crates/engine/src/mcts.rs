@@ -100,6 +100,51 @@ impl Search {
         }
     }
 
+    /// Promote the played child after all outstanding leaves have been backed up.
+    pub(crate) fn advance_root(&mut self, played: Move) {
+        let old = &mut self.tree;
+        debug_assert_eq!(old.nodes[0].pending, 0);
+        let NodeState::Branch(children) = &old.nodes[0].state else {
+            unreachable!("played root must be expanded");
+        };
+        let child = children
+            .clone()
+            .find(|&i| old.moves[i - 1] == played)
+            .expect("played root move");
+        // Compact just this subtree, preserving the order of each node's children.
+        let mut nodes = vec![std::mem::take(&mut old.nodes[child])];
+        let mut moves = Vec::new();
+        let mut index = 0;
+        while index < nodes.len() {
+            let start = nodes.len();
+            if let NodeState::Branch(children) = &mut nodes[index].state {
+                let previous = children.clone();
+                *children = start..start + previous.len();
+                moves.extend_from_slice(&old.moves[previous.start - 1..previous.end - 1]);
+                nodes.extend(old.nodes[previous].iter_mut().map(std::mem::take));
+            }
+            index += 1;
+        }
+        // A root counts only outgoing visits. Exclude its own initial network
+        // evaluation and reconstruct WDL in the new side-to-move perspective.
+        if let NodeState::Branch(children) = &nodes[0].state {
+            let mut visits = 0;
+            let mut value_sum = 0.;
+            let mut draw_sum = 0.;
+            for child in &nodes[children.clone()] {
+                visits += child.visits;
+                value_sum -= child.value_sum;
+                draw_sum += child.draw_sum;
+            }
+            let root = &mut nodes[0];
+            root.visits = visits;
+            root.value_sum = value_sum;
+            root.draw_sum = draw_sum;
+        }
+        self.tree = Tree { nodes, moves };
+        self.path.clear();
+    }
+
     /// Reserve up to `limit` leaves for evaluation and return the number collected.
     pub fn collect_leaves(
         &mut self,
@@ -247,6 +292,40 @@ impl Search {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn promoting_a_child_preserves_its_subtree_and_backs_up_only_outgoing_visits() {
+        let mut game = Game::default();
+        let mut search = Search::new();
+        let budget = NonZeroU32::new(8).unwrap();
+        // Force a single principal variation for the first three simulations.
+        for (value, draw) in [(0., 0.), (0.75, 0.125), (0.25, 0.5), (-0.5, 0.25)] {
+            let leaf = search.next_leaf(&game, budget, 10.).unwrap();
+            let mut priors = vec![0.; leaf.moves.len()];
+            priors[0] = 1.;
+            search.evaluate(leaf, value, draw, &priors);
+        }
+        let played = search.best_move();
+        let before = search.tree.nodes.len();
+        game.play_legal(played);
+        search.advance_root(played);
+        assert!(search.tree.nodes.len() < before);
+        assert_eq!(search.tree.nodes[0].visits, 2);
+        assert_eq!(search.root_value(), (-0.25 - 0.5) / 2.);
+        assert_eq!(search.root_draw(), (0.5 + 0.25) / 2.);
+        assert_eq!(
+            search.visits().map(|v| v.mv).collect::<Vec<_>>(),
+            game.legal_moves()
+        );
+        let mut fresh = 0;
+        while let Some(leaf) = search.next_leaf(&game, budget, 1.4) {
+            let priors = vec![1. / leaf.moves.len() as f32; leaf.moves.len()];
+            search.evaluate(leaf, 0., 0.5, &priors);
+            fresh += 1;
+        }
+        assert_eq!(fresh, 6);
+        assert_eq!(search.visits().map(|v| v.visits).sum::<u32>(), 8);
+    }
 
     #[test]
     fn a_root_prior_guides_the_first_visit_without_using_the_budget() {

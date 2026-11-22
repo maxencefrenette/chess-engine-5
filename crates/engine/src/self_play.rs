@@ -28,6 +28,7 @@ pub struct Config {
     leaves_per_game: NonZeroUsize,
     search_threads: NonZeroUsize,
     visits_per_move: NonZeroU16,
+    reuse_subtree: bool,
     seed: u64,
     #[range(min = 0.0)]
     temperature: f64,
@@ -124,8 +125,15 @@ impl ActiveGame {
             root_d: self.search.root_draw(),
         });
         self.game.play_legal(played);
-        self.search = Search::new();
-        self.game.outcome()
+        let outcome = self.game.outcome();
+        if outcome.is_none() {
+            if config.reuse_subtree {
+                self.search.advance_root(played);
+            } else {
+                self.search = Search::new();
+            }
+        }
+        outcome
     }
 }
 
@@ -143,6 +151,7 @@ pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) ->
     let total_games = config.total_games.get();
     let games_per_shard = config.games_per_shard.get();
     let mut generation_seconds = 0.;
+    let mut evaluated_leaves = 0u64;
     let mut shards = 0;
     let mut positions = 0;
     let mut white_wins = 0;
@@ -151,7 +160,10 @@ pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) ->
     for start in (0..total_games).step_by(games_per_shard) {
         let end = start.saturating_add(games_per_shard).min(total_games);
         let started = Instant::now();
-        let games = play_games(settings, config, start..end, |batch| model.evaluate(batch))?;
+        let games = play_games(settings, config, start..end, |batch| {
+            evaluated_leaves += batch.len() as u64;
+            model.evaluate(batch)
+        })?;
         let elapsed = started.elapsed();
         generation_seconds += elapsed.as_secs_f64();
         let shard_positions: usize = games.iter().map(|(_, game)| game.positions.len()).sum();
@@ -180,6 +192,7 @@ pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) ->
     let manifest = json!({
         "format_version": FORMAT_VERSION,
         "generation_seconds": generation_seconds,
+        "evaluated_leaves": evaluated_leaves,
         "seed": config.seed,
         "engine_version": env!("CARGO_PKG_VERSION"),
         "engine_revision": env::var("CE5_ENGINE_REVISION").ok(),
@@ -192,6 +205,7 @@ pub fn generate(config: &Config, model: &ModelEvaluator, settings: &Settings) ->
         "draws": draws,
         "start_position": "standard",
         "visits_per_move": config.visits_per_move.get(),
+        "reuse_subtree": config.reuse_subtree,
         "value": model.value_config(),
         "priors": "smolgen-policy-v1",
         "checkpoint": model.model_dir,
