@@ -1,11 +1,11 @@
 ---
-name: model-improvement-experiments
-description: Plan, run, and interpret Chess Engine 5 experiments on training data, model architecture, training recipes, and model inference.
+name: experiments
+description: Plan, run, and interpret experiments on training data, model architecture, training recipes, model inference, and search in batched games.
 ---
 
 # Scope
 
-This skill covers data generation and labeling, data selection and sampling, model architecture, training recipes, and model inference. Engine and search changes are out of scope. All experiments should compare a candidate against the baseline with the goal of getting a measurable nElo gain.
+This skill covers data generation and labeling, data selection and sampling, model architecture, training recipes, model inference, and search in batched games. All experiments should compare a candidate against the baseline with the goal of getting a measurable nElo gain.
 
 ## Multiple experiments
 
@@ -13,7 +13,7 @@ Run experiments sequentially. Finish each experiment’s evaluation and promotio
 
 ## Training budget
 
-Every training run is subject to a budget of 60min. It is defined as the time to train the model + the time required to generate the data that went into training the model. The budget used is reported by `mise run train`. Held-out data is excluded from the calculation. The timed runtime excludes data loading and setup and includes held-out evaluation and checkpoint saving. All arms of an experiment must be roughly budget-matched by being within 5% of the 60min budget.
+Every training run is subject to a budget of 60min. It is defined as the time to train the model + the time required to generate the data that went into training the model. The budget used is reported by `mise run train`. Held-out data is excluded from the calculation. The timed runtime excludes data loading and setup and includes held-out evaluation and checkpoint saving. All training runs must be roughly budget-matched by being within 5% of the 60min budget.
 
 ## Sweeps
 
@@ -29,13 +29,13 @@ Changes how self-play trajectories and search labels are produced, including the
 
 Required evidence:
 * Train a new model with the new data
-* `mise run eval-model -- gainer --matched-speed "$candidate_dir"`
+* `mise run eval-model -- gainer "$candidate_dir" --matched-speed`
 
 ### Training data usage
 
 Changes which existing examples supervise each output, or when and how often they are presented. This includes position selection, epochs, curriculum order, and target masking.
 
-Required evidence: `mise run eval-model -- gainer --matched-speed "$candidate_dir"`
+Required evidence: `mise run eval-model -- gainer "$candidate_dir" --matched-speed`
 
 ### Model architecture
 
@@ -63,13 +63,13 @@ Required evidence: `mise run eval-model -- non-regression "$candidate_dir"`
 Changes how predictions and targets produce parameter updates, including optimizers, learning-rate schedules, batch size, adding auxiliary heads.
 
 Intermediate evidence: Held-out loss is a useful metric to determine if a candidate deserves a full SPRT test.
-Required evidence: `mise run eval-model -- gainer --matched-speed "$candidate_dir"`
+Required evidence: `mise run eval-model -- gainer "$candidate_dir" --matched-speed`
 
 ### Training objective
 
 Changes what the deployed policy or value head is trained to predict, or how training weights errors on those outputs. Examples include sharpening visit targets and changing the relative weights of policy and value loss. Multiple candidates may be run in a match against the baseline.
 
-Required evidence: `mise run eval-model -- gainer --matched-speed "$candidate_dir"`
+Required evidence: `mise run eval-model -- gainer "$candidate_dir" --matched-speed`
 
 ### Inference approximation
 
@@ -80,13 +80,17 @@ Examples:
 
 Require evidence: `mise run eval-model -- gainer "$candidate_dir"`
 
-### Search and playing behavior
+### Search
 
-Changes how predictions become moves during play. Search behavior during data generation belongs to Data generation. This category covers search changes during evaluation or other play and is outside this skill's current scope.
+Changes how search turns predictions into moves during a match, including the PUCT exploration constant and subtree reuse. Changes made only to produce training games belong to Data generation. Time management requires timed games and is outside the scope of `eval-search`.
 
-Out of scope for now since we don't have a good testing setup for this.
+Use `eval-search` for a gainer with the configured baseline checkpoint and equal total root visits for both players. The baseline always plays with the settings in `config/engine.toml`. The candidate starts with those settings and takes overrides through `--set candidate.KEY=VALUE`.
 
-### Behavior-preserving implementation
+```sh
+mise run eval-search -- gainer --set candidate.KEY=VALUE
+```
+
+### Behavior-preserving speedup
 
 Changes how the same computation is executed while preserving its intended results. This includes optimizations to training, inference, data generation, and match execution. A batching change belongs here only if it preserves each game's search behavior.
 
@@ -100,11 +104,11 @@ Changes how systems are measured or compared, including statistical tests, bench
 
 ### Combined intervention
 
-Deliberately combines two or more independent changes from Data generation through Search and playing behavior. Use this category only when the changes are separate experimental choices. Supporting code changes and adjustments needed to match the budget do not make an experiment combined. Reuse checkpoint weights for inference-only experiments when possible and verify that each side uses its intended inference path. Use your judgement to determine what evidence is required for a candidate to replace the baseline.
+Deliberately combines two or more independent changes from Data generation through Search. Use this category only when the changes are separate experimental choices. Supporting code changes and adjustments needed to match the budget do not make an experiment combined. Use your judgement to determine what evidence is required for a candidate to replace the baseline.
 
 ## Updates
 
-After a successful baseline match, set `baseline_dir` in `config/eval-model.toml` to the candidate checkpoint directory. Carry forward winning settings in `config/training.toml` and `config/datagen.toml` where applicable.
+After a successful checkpoint match, set `baseline_dir` in `config/eval-model.toml` to the candidate checkpoint directory. Carry forward winning settings in `config/training.toml` and `config/datagen.toml` where applicable. After a successful search-only match, promote the winning engine settings in `config/engine.toml`.
 
 ## Report
 
@@ -112,7 +116,6 @@ After finishing an experiment, regardless of if it's successful or not, write an
 
 An experiment report must include the following:
 * The 1-sentence goal of the experiment
-* Timed training runtime, estimated training-data generation time, and weighted total
 * [optional] svg charts, embedded in the README.md
 
 If a baseline match was run, include:

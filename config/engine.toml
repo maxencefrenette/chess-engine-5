@@ -1,2 +1,2 @@
-# PUCT exploration constant shared by search, self-play, and evaluation.
 exploration = 1.4
+reuse_subtree = false

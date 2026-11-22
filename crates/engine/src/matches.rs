@@ -23,7 +23,8 @@ use search::{Group, Work};
 struct ActiveGame {
     id: u64,
     game: Game,
-    search: Search,
+    // Each player can reuse only predictions from its own searches.
+    searches: [Search; 2],
 }
 
 impl ActiveGame {
@@ -31,7 +32,7 @@ impl ActiveGame {
         Self {
             id,
             game: openings[(id / 2) as usize].clone(),
-            search: Search::new(),
+            searches: std::array::from_fn(|_| Search::new()),
         }
     }
 
@@ -47,10 +48,21 @@ impl ActiveGame {
         usize::from(self.game.turn() == self.candidate_color())
     }
 
-    fn play(&mut self) -> Option<Outcome> {
-        self.game.play_legal(self.search.best_move());
-        self.search = Search::new();
-        self.game.outcome()
+    fn play(&mut self, settings: &[Settings; 2]) -> Option<Outcome> {
+        let player = self.player();
+        let mv = self.searches[player].best_move();
+        self.game.play_legal(mv);
+        let outcome = self.game.outcome();
+        if outcome.is_none() {
+            for (side, tree) in self.searches.iter_mut().enumerate() {
+                if settings[side].reuse_subtree {
+                    tree.advance_root(mv);
+                } else if side == player {
+                    *tree = Search::new();
+                }
+            }
+        }
+        outcome
     }
 }
 
@@ -205,7 +217,7 @@ pub fn run(
     mode: Mode,
     matched_speed: bool,
     players: [&ModelEvaluator; 2],
-    settings: &Settings,
+    settings: [Settings; 2],
 ) -> io::Result<()> {
     if options.batch == 0 || options.max_pairs == 0 || options.max_pairs > u64::MAX / 2 {
         return Err(io::Error::other(
@@ -248,12 +260,22 @@ pub fn run(
     // Benchmark a full worker group. The queue can combine several ready groups.
     let games_per_group = slots.div_ceil(options.search_threads.get()).div_ceil(2);
     let benchmark_batch = games_per_group * usize::from(options.leaves_per_game.get());
-    let visits = time_matched_visits(
-        players,
-        benchmark_batch,
-        options.baseline_visits_per_move,
-        matched_speed,
-    )?;
+    let visits = if std::ptr::eq(players[0], players[1]) {
+        [options.baseline_visits_per_move; 2]
+    } else {
+        time_matched_visits(
+            players,
+            benchmark_batch,
+            options.baseline_visits_per_move,
+            matched_speed,
+        )?
+    };
+    for (name, search) in ["baseline", "candidate"].into_iter().zip(&settings) {
+        println!(
+            "{name} search: exploration={} reuse_subtree={}",
+            search.exploration, search.reuse_subtree
+        );
+    }
     let mut work = Mutex::new(Work {
         ids: 0..limit,
         results: Default::default(),
@@ -271,7 +293,7 @@ pub fn run(
         );
     }
     println!(
-        "checkpoint match; batch={} leaves_per_game={} visits baseline={} candidate={} max_pairs={} seed={}",
+        "batch match; batch={} leaves_per_game={} visits baseline={} candidate={} max_pairs={} seed={}",
         options.batch,
         options.leaves_per_game,
         visits[0],
@@ -337,7 +359,7 @@ pub fn run(
                 &work,
                 &openings,
                 visits,
-                settings.exploration,
+                &settings,
                 options.leaves_per_game,
             )
         },
@@ -380,7 +402,6 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chess_config::TomlConfig;
 
     #[test]
     fn matched_speed_accepts_noise_and_rejects_both_directions() {
@@ -453,6 +474,7 @@ mod tests {
 
     #[test]
     fn configured_baseline_checkpoint_loads_on_cpu() -> Result<(), Box<dyn std::error::Error>> {
+        use chess_config::TomlConfig;
         let options = Options::from_repo_file("eval-model.toml")?;
         ModelEvaluator::load(&options.baseline_dir, chess_config::DeviceConfig::Cpu).map_err(
             |error| {

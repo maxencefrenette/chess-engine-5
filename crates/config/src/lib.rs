@@ -4,12 +4,13 @@ pub use chess_config_derive::{TomlConfig, toml_config};
 use serde::de::DeserializeOwned;
 use toml::{Table, Value};
 
+pub fn repo_config_path(name: &str) -> String {
+    format!("{}/../../config/{name}", env!("CARGO_MANIFEST_DIR"))
+}
+
 pub trait TomlConfig: DeserializeOwned {
     fn from_repo_file(name: &str) -> Result<Self, Box<dyn Error>> {
-        Self::from_file(&format!(
-            "{}/../../config/{name}",
-            env!("CARGO_MANIFEST_DIR")
-        ))
+        Self::from_file(&repo_config_path(name))
     }
 
     fn from_file(path: &str) -> Result<Self, Box<dyn Error>> {

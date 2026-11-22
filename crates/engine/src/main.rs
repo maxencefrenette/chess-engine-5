@@ -1,6 +1,6 @@
 use std::{env, path::Path, process::ExitCode};
 
-use chess_config::{DeviceConfig, TomlConfig};
+use chess_config::{DeviceConfig, TomlConfig, repo_config_path};
 use chess_engine::{
     chess::Game,
     matches::{self, Mode, Options},
@@ -12,7 +12,8 @@ use chess_engine::{
 const USAGE: &str = "usage: chess-engine [--cuda] <command>
   search MODEL_DIR VISITS [MOVE ...]
   self-play [--config PATH] [--set KEY=VALUE]...
-  eval-model <gainer|non-regression|fixed> CANDIDATE_DIR [--matched-speed] [--config PATH] [--set KEY=VALUE]...";
+  eval-model <gainer|non-regression|fixed> CANDIDATE_DIR [--matched-speed] [--config PATH] [--set KEY=VALUE]...
+  eval-search <gainer|non-regression|fixed> [--config PATH] [--set candidate.KEY=VALUE] [--set KEY=VALUE]...";
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
@@ -22,19 +23,35 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         (DeviceConfig::Cpu, first)
     };
-    if command == "eval-model" && device == DeviceConfig::Cpu {
+    if matches!(command.as_str(), "eval-model" | "eval-search") && device == DeviceConfig::Cpu {
         let mode = match args.next().as_deref() {
             Some("gainer") => Mode::Gainer,
             Some("non-regression") => Mode::NonRegression,
             Some("fixed") => Mode::Fixed,
             _ => return Err(USAGE.into()),
         };
+        let settings = Settings::load()?;
+        if command == "eval-search" {
+            let (options, candidate_settings) = search_options(args)?;
+            let model = ModelEvaluator::load(&options.baseline_dir, options.device)?;
+            println!(
+                "shared checkpoint={} device={}",
+                options.baseline_dir.display(),
+                options.device
+            );
+            return Ok(matches::run(
+                options,
+                mode,
+                false,
+                [&model, &model],
+                [settings, candidate_settings],
+            )?);
+        }
         let candidate_dir = args
             .next()
             .filter(|arg| !arg.starts_with("--"))
             .ok_or(USAGE)?;
         let (options, matched_speed) = eval_options(args)?;
-        let settings = Settings::load()?;
         let baseline = ModelEvaluator::load(&options.baseline_dir, options.device)?;
         let candidate = ModelEvaluator::load(Path::new(&candidate_dir), options.device)?;
         println!(
@@ -48,7 +65,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             mode,
             matched_speed,
             [&baseline, &candidate],
-            &settings,
+            [settings; 2],
         )?);
     }
     if command == "self-play" && device == DeviceConfig::Cpu {
@@ -109,8 +126,39 @@ fn eval_options(
         }
     }
     Ok((
-        Options::load("config/eval-model.toml", config_args.into_iter())?,
+        Options::load(
+            &repo_config_path("eval-model.toml"),
+            config_args.into_iter(),
+        )?,
         matched_speed,
+    ))
+}
+
+fn search_options(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(Options, Settings), Box<dyn std::error::Error>> {
+    let mut match_args = Vec::new();
+    let mut candidate_args = Vec::new();
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--set" => {
+                let entry = args.next().ok_or("--set needs KEY=VALUE")?;
+                if let Some(setting) = entry.strip_prefix("candidate.") {
+                    candidate_args.extend([flag, setting.to_owned()]);
+                } else {
+                    match_args.extend([flag, entry]);
+                }
+            }
+            "--config" => match_args.extend([flag, args.next().ok_or("--config needs a path")?]),
+            _ => return Err(format!("unexpected argument {flag}").into()),
+        }
+    }
+    Ok((
+        Options::load(&repo_config_path("eval-model.toml"), match_args.into_iter())?,
+        <Settings as TomlConfig>::load(
+            &repo_config_path("engine.toml"),
+            candidate_args.into_iter(),
+        )?,
     ))
 }
 
@@ -127,6 +175,25 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_overrides_apply_only_to_the_candidate() -> Result<(), Box<dyn std::error::Error>> {
+        let baseline = Settings::load()?;
+        let (_, candidate) = search_options(
+            ["--set", "max_pairs=2", "--set", "candidate.exploration=2.5"]
+                .into_iter()
+                .map(String::from),
+        )?;
+        assert_eq!(candidate.exploration, 2.5);
+        assert_eq!(candidate.reuse_subtree, baseline.reuse_subtree);
+        for entry in ["baseline.exploration=2.5", "candidate.exploration=-1"] {
+            assert!(search_options(["--set", entry].into_iter().map(String::from)).is_err());
+        }
+        for entry in ["candidate.exploration=2.5", "baseline.exploration=2.5"] {
+            assert!(eval_options(["--set", entry].into_iter().map(String::from)).is_err());
+        }
+        Ok(())
+    }
 
     #[test]
     fn matched_speed_flag_works_alongside_config_overrides() {

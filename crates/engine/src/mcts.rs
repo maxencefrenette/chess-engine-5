@@ -104,6 +104,10 @@ impl Search {
     pub(crate) fn advance_root(&mut self, played: Move) {
         let old = &mut self.tree;
         debug_assert_eq!(old.nodes[0].pending, 0);
+        // The opponent can play from a position this player never searched.
+        if matches!(old.nodes[0].state, NodeState::Unexpanded) {
+            return;
+        }
         let NodeState::Branch(children) = &old.nodes[0].state else {
             unreachable!("played root must be expanded");
         };

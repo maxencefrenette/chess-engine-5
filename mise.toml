@@ -28,6 +28,10 @@ exec
 description = "Evaluate a candidate checkpoint against a baseline on CUDA"
 run = "mise run with-cuda -- cargo run --release --locked -p chess-engine --features cuda -- eval-model"
 
+[tasks.eval-search]
+description = "Evaluate candidate search settings using the baseline checkpoint"
+run = "mise run with-cuda -- cargo run --release --locked -p chess-engine --features cuda -- eval-search"
+
 [tasks.train]
 description = "Train a model using the training configuration"
 run = "mise run with-cuda -- cargo run --release --locked -p chess-trainer --features cuda --"
