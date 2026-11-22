@@ -92,13 +92,14 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         return Err(format!("output already exists: {}", output_dir.display()).into());
     }
     let setup_started = Instant::now();
-    data::check_disjoint(curriculum.iter().map(|step| step.dataset.as_path()))?;
+    let shards = data::curriculum_shards(curriculum.iter().map(|step| step.dataset.as_path()))?;
     let datasets = curriculum
         .iter()
+        .zip(shards)
         .enumerate()
-        .map(|(index, step)| {
+        .map(|(index, (step, shards))| {
             data::load(
-                &step.dataset,
+                &shards,
                 &config,
                 step.num_positions.get(),
                 index + 1 == curriculum.len(),
@@ -120,7 +121,11 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         .try_fold(0usize, |total, &steps| total.checked_add(steps))
         .ok_or("total curriculum optimizer steps overflow")?;
     let held_out = datasets.last().expect("validated non-empty curriculum");
-    let train_games = datasets.iter().map(|data| data.train_games).sum::<usize>();
+    let mut value_labels: Vec<_> = datasets
+        .iter()
+        .flat_map(|data| data.value_labels_per_game.iter().copied())
+        .collect();
+    let train_games = value_labels.len();
     let train_positions = datasets.iter().map(|data| data.train.len()).sum::<usize>();
     let generation_seconds = datasets
         .iter()
@@ -133,16 +138,11 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         held_out.test_ids.len(),
         held_out.test.len()
     );
-    let mut value_labels: Vec<_> = datasets
-        .iter()
-        .flat_map(|data| data.value_labels_per_game.iter().copied())
-        .collect();
     value_labels.sort_unstable();
     let value_label_count = value_labels.iter().sum::<usize>();
     let value_p90 = value_labels[(value_labels.len() * 9).div_ceil(10) - 1];
     println!(
-        "value supervision: {value_label_count} labels across {} games; p90 {value_p90} labels/game",
-        value_labels.len()
+        "value supervision: {value_label_count} labels across {train_games} games; p90 {value_p90} labels/game"
     );
     if device.is_cuda() {
         device.set_seed(seed)?;
@@ -311,7 +311,7 @@ pub fn run(config: Config, device: &Device) -> Result<()> {
         "train_games": train_games,
         "train_positions": train_positions,
         "value_train_positions": value_label_count,
-        "value_train_games": value_labels.len(),
+        "value_train_games": train_games,
         "value_labels_per_game_p90": value_p90,
         "test_game_ids": held_out.test_ids,
         "test_positions": held_out.test.len(),

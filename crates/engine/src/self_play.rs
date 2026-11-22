@@ -56,7 +56,6 @@ struct ActiveGame {
     game: Game,
     search: Search,
     rng: ChaCha8Rng,
-    ply: u16,
     positions: Vec<Position>,
 }
 
@@ -69,7 +68,6 @@ impl ActiveGame {
             game: Game::default(),
             search: Search::new(),
             rng,
-            ply: 0,
             positions: Vec::new(),
         }
     }
@@ -90,23 +88,27 @@ impl ActiveGame {
         {
             return None;
         }
-        let temperature = match config.cooling {
-            Cooling::After { ply, temperature } if self.ply >= ply => temperature,
-            _ => config.temperature,
-        };
-        self.play(temperature).map(|outcome| match outcome {
+        self.play(config).map(|outcome| match outcome {
             Outcome::Win(Color::White) => 1,
             Outcome::Win(Color::Black) => -1,
             Outcome::Draw => 0,
         })
     }
 
-    fn play(&mut self, temperature: f64) -> Option<Outcome> {
+    fn play(&mut self, config: &Config) -> Option<Outcome> {
+        let ply = u16::try_from(self.positions.len()).expect("game ply fits in u16");
+        let temperature = match config.cooling {
+            Cooling::After {
+                ply: start,
+                temperature,
+            } if ply >= start => temperature,
+            _ => config.temperature,
+        };
         let played = self.search.choose_move(temperature, &mut self.rng);
         let policy: Vec<_> = self.search.visits().collect();
         let legal_moves: Vec<_> = policy.iter().map(|entry| entry.mv).collect();
         self.positions.push(Position {
-            ply: self.ply,
+            ply,
             snapshot: self.game.snapshot(&legal_moves),
             policy: policy
                 .into_iter()
@@ -122,7 +124,6 @@ impl ActiveGame {
             root_d: self.search.root_draw(),
         });
         self.game.play_legal(played);
-        self.ply += 1;
         self.search = Search::new();
         self.game.outcome()
     }

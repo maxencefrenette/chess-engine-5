@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use candle_core::{Device, Tensor};
@@ -25,28 +25,32 @@ pub struct Dataset {
     pub train: Vec<Row>,
     pub test: Vec<Row>,
     pub target_seconds: f64,
-    pub train_games: usize,
     pub value_labels_per_game: Vec<usize>,
     pub test_ids: Vec<u64>,
     pub estimated_generation_seconds: f64,
 }
 
-pub fn check_disjoint<'a>(datasets: impl IntoIterator<Item = &'a Path>) -> Result<()> {
+pub fn curriculum_shards<'a>(
+    datasets: impl IntoIterator<Item = &'a Path>,
+) -> Result<Vec<Vec<PathBuf>>> {
     let mut seen = BTreeSet::new();
+    let mut phases = Vec::new();
     for dataset in datasets {
-        for shard in discover_shards(dataset)? {
-            if !seen.insert(fs::canonicalize(&shard)?) {
+        let shards = discover_shards(dataset)?;
+        for shard in &shards {
+            if !seen.insert(fs::canonicalize(shard)?) {
                 return Err(
                     format!("curriculum uses shard {} more than once", shard.display()).into(),
                 );
             }
         }
+        phases.push(shards);
     }
-    Ok(())
+    Ok(phases)
 }
 
 pub fn load(
-    dataset: &Path,
+    shards: &[PathBuf],
     config: &crate::config::Config,
     train_positions: usize,
     retain_holdout: bool,
@@ -55,8 +59,8 @@ pub fn load(
     let value_sample_rate = config.value_sample_rate;
     let root_fraction = config.root_wdl_fraction as f32;
     let mut rows = Vec::new();
-    for shard in discover_shards(dataset)? {
-        read_shard(&shard, |row| {
+    for shard in shards {
+        read_shard(shard, |row| {
             rows.push(row);
             Ok(())
         })?;
@@ -131,7 +135,6 @@ pub fn load(
             .filter(|_| retain_holdout)
             .map(|row| encode_row(row, root_fraction, true, config.model.perspective))
             .collect::<Result<_>>()?,
-        train_games: by_game.len(),
         value_labels_per_game,
         test_ids,
         estimated_generation_seconds,
@@ -234,6 +237,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn curriculum_rejects_a_shard_selected_by_both_directory_and_file() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let shard = dir.path().join("one.parquet");
+        fs::File::create(&shard)?;
+        let other = tempfile::NamedTempFile::new()?;
+        assert_eq!(
+            curriculum_shards([dir.path(), other.path()])?,
+            [vec![shard.clone()], vec![other.path().to_owned()]]
+        );
+        assert!(curriculum_shards([dir.path(), &shard]).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn both_splits_mix_root_wdl_and_only_training_masks_values() -> Result<()> {
         use chess_config::TomlConfig;
         use chess_data::{Board, Position};
@@ -262,6 +279,7 @@ mod tests {
         config.value_sample_rate = 0.5;
         config.reply_weight = 0.;
         let outcome = [0., 1., 0.];
+        let shards = discover_shards(dir.path())?;
         for (fraction, target) in [
             (0.0, outcome),
             (0.25, [0.03125, 0.875, 0.09375]),
@@ -269,7 +287,8 @@ mod tests {
             (1.0, [0.125, 0.5, 0.375]),
         ] {
             config.root_wdl_fraction = fraction;
-            let data = load(dir.path(), &config, 12, true)?;
+            let data = load(&shards, &config, 12, true)?;
+            assert_eq!(data.value_labels_per_game, [2, 2, 2]);
             assert_eq!(data.train.iter().filter(|row| row.use_value).count(), 6);
             assert_eq!(data.test.len(), 4);
             assert!(
